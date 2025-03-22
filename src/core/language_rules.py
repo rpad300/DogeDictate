@@ -166,6 +166,13 @@ class LanguageRulesManager:
         key = push_to_talk.get("key", "")
         logger.warning(f"Push-to-talk key: {key}")
         
+        # Verificar se a tecla é ctrl
+        if key == "ctrl":
+            logger.warning("Push-to-talk key is ctrl, checking target language from translation config")
+            target_language = self.config_manager.get_value("translation", "target_language")
+            logger.warning(f"Using target language for ctrl from translation config: {target_language}")
+            return target_language
+        
         # Verificar se existe uma configuração específica para esta tecla em language_rules.key_languages
         key_languages = self.config_manager.get_value("language_rules", "key_languages", {})
         if isinstance(key_languages, dict) and key in key_languages:
@@ -249,7 +256,12 @@ class LanguageRulesManager:
             
             if hotkey_type == "push_to_talk":
                 target_language = self.get_target_language_for_push_to_talk()
-                logger.warning(f"Using push-to-talk target language: {target_language}")
+                logger.warning(f"[PUSH-TO-TALK] Using push-to-talk target language: {target_language}")
+                
+                # Log adicional para push-to-talk
+                push_to_talk = self.config_manager.get_value("hotkeys", "push_to_talk", {})
+                key = push_to_talk.get("key", "")
+                logger.warning(f"[PUSH-TO-TALK] Key: {key}, Target Language: {target_language}")
             elif hotkey_type == "hands_free":
                 target_language = self.get_target_language_for_hands_free()
                 logger.warning(f"Using hands-free target language: {target_language}")

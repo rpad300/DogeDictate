@@ -60,7 +60,7 @@ class StatsTab(BaseTab):
                 # Fallback para criar uma nova instância
                 from src.services.stats_service import StatsService
                 logger.warning("Parent or dictation_manager not available, creating new StatsService instance")
-                self.stats_service = StatsService(self.config_manager)
+                self.stats_service = StatsService(self.config_manager._get_config_dir())
                 self.stats_service.register_update_callback(self.load_settings)
                 
                 # Depurar estatísticas atuais
@@ -75,7 +75,7 @@ class StatsTab(BaseTab):
             try:
                 from src.services.stats_service import StatsService
                 logger.warning("Error occurred, creating new StatsService instance as fallback")
-                self.stats_service = StatsService(self.config_manager)
+                self.stats_service = StatsService(self.config_manager._get_config_dir())
             except Exception as e2:
                 logger.error(f"Failed to create fallback StatsService: {str(e2)}")
     

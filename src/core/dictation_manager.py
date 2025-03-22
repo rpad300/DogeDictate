@@ -157,7 +157,7 @@ class DictationManager:
         
         # Initialize stats service if available
         if self.config_manager.get_value("stats", "enabled", True):
-            self.stats_service = StatsService(self.config_manager)
+            self.initialize_stats()
         else:
             self.stats_service = None
             
@@ -284,10 +284,27 @@ class DictationManager:
             
             # Initialize Azure OpenAI translator
             azure_openai_key = self.config_manager.get_value("translation", "azure_openai_key", "")
-            if azure_openai_key:
+            azure_openai_endpoint = self.config_manager.get_value("translation", "azure_openai_endpoint", "")
+            # Usar um modelo de deployment mais comum por padrão (gpt-35-turbo em vez de gpt-4o)
+            azure_openai_deployment = self.config_manager.get_value("translation", "azure_openai_deployment", "gpt-35-turbo")
+            
+            if azure_openai_key and azure_openai_endpoint:
                 self.logger.info("Initializing Azure OpenAI service...")
-                self.azure_openai_service = AzureOpenAIService(self.config_manager)
-                self.logger.warning("Using Azure OpenAI for translation")
+                # Log detalhado das configurações do Azure OpenAI
+                self.logger.info(f"Azure OpenAI endpoint: {azure_openai_endpoint}")
+                self.logger.info(f"Azure OpenAI deployment: {azure_openai_deployment}")
+                
+                # Remover barras extras no final da URL se existirem
+                if azure_openai_endpoint.endswith("/"):
+                    azure_openai_endpoint = azure_openai_endpoint.rstrip("/")
+                    self.logger.info(f"Sanitized Azure OpenAI endpoint: {azure_openai_endpoint}")
+                
+                self.azure_openai_service = AzureOpenAIService(
+                    api_key=azure_openai_key, 
+                    endpoint=azure_openai_endpoint,
+                    deployment_name=azure_openai_deployment
+                )
+                self.logger.warning("Azure OpenAI service initialized successfully")
             
             # Initialize M2M100 translator
             self.logger.info("Initializing M2M100 translator service...")
@@ -689,18 +706,23 @@ class DictationManager:
         try:
             # Mapeamento de serviços para seus respectivos objetos
             translator_mapping = {
+                "azure": self._get_azure_translator_service,  # Alias "azure" para azure_translator
                 "azure_translator": self._get_azure_translator_service,
                 "m2m100": lambda: self.m2m100_translator_service,
                 "azure_openai": self._get_azure_openai_service,
                 "local_llm": lambda: self.local_llm_translator_service
             }
             
+            # Log para diagnóstico da seleção de serviço
+            self.logger.info(f"Selecionando serviço de tradução: {service_name}")
+            
             # Verificar se o serviço está no mapeamento
             if service_name in translator_mapping:
                 service = translator_mapping[service_name]()
                 if service:
+                    self.logger.info(f"Usando serviço de tradução: {service_name}")
                     return service
-                    
+            
             # Se o serviço solicitado não existe ou não retornou um objeto válido
             self.logger.warning(f"Translation service {service_name} not available, falling back to M2M100")
             return self.m2m100_translator_service
@@ -1808,9 +1830,36 @@ class DictationManager:
                 self.logger.error(f"Translation service '{translator_service_name}' not available")
                 return text
                 
-            # Tentar traduzir
+            # Tentar traduzir com tratamento de erros mais robusto
             start_time = time.time()
-            translated_text = translator_service.translate(text, source_lang, target_lang)
+            translated_text = None
+            
+            try:
+                # Configurar timeout para evitar bloqueio
+                timeout_sec = 30  # Timeout de 30 segundos
+                timeout_thread = threading.Timer(timeout_sec, lambda: self.logger.error(f"Translation timeout after {timeout_sec} seconds"))
+                timeout_thread.start()
+                
+                # Chamar o método de tradução
+                translated_text = translator_service.translate(text, source_lang, target_lang)
+                
+                # Cancelar timer de timeout
+                timeout_thread.cancel()
+                
+            except Exception as translate_error:
+                self.logger.error(f"Error during translation with {translator_service_name}: {str(translate_error)}")
+                self.logger.error(traceback.format_exc())
+                
+                # Se o serviço atual falhou e não era o M2M100, tentar M2M100 como último recurso
+                if translator_service_name != "m2m100" and hasattr(self, 'm2m100_translator_service'):
+                    self.logger.warning(f"Trying fallback translation with M2M100 after {translator_service_name} failed")
+                    try:
+                        translated_text = self.m2m100_translator_service.translate(text, source_lang, target_lang)
+                        translator_service_name = "m2m100"  # Atualizar nome do serviço para estatísticas
+                    except Exception as m2m_error:
+                        self.logger.error(f"M2M100 fallback translation also failed: {str(m2m_error)}")
+                        return text
+            
             end_time = time.time()
             
             # Verificar resultado
@@ -1909,4 +1958,16 @@ class DictationManager:
             self.logger.error(traceback.format_exc())
             return text
 
+    def initialize_stats(self):
+        """Initialize the statistics service"""
+        try:
+            from src.services.stats_service import StatsService
+            if self.config_manager:
+                self.stats_service = StatsService(self.config_manager._get_config_dir())
+            else:
+                self.stats_service = None
+        except Exception as e:
+            logger.error(f"Failed to initialize stats service: {e}")
+            self.stats_service = None
+    
     

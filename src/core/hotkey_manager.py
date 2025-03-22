@@ -879,9 +879,13 @@ class HotkeyManager:
                 self.logger.debug("Push-to-talk already active, ignoring")
                 return
             
+            # Verificar se a tecla é ctrl
+            if key_name == "ctrl":
+                self.logger.warning(f"Push-to-talk with CTRL key detected: {key_name}")
+            
             # Ativar push-to-talk
             self.push_to_talk_active = True
-            self.logger.info("Push-to-talk activated")
+            self.logger.info(f"Push-to-talk activated with key: {key_name}")
             
             # Verificar se devemos definir o idioma
             try:
@@ -1014,12 +1018,24 @@ class HotkeyManager:
                                      Se não for fornecido, usa self.push_to_talk_key.
         """
         try:
-            self.logger.info("Setting language for push-to-talk")
+            self.logger.info(f"Setting language for push-to-talk with key: {key_name}")
             
             # Se key_name não foi fornecido, usar o push_to_talk_key padrão
             if key_name is None:
                 key_name = self.push_to_talk_key
-                
+            
+            # Tratamento especial para a tecla ctrl
+            if key_name == "ctrl":
+                self.logger.warning(f"Special handling for CTRL key in push-to-talk")
+                # Verificar se temos um DictationManager válido
+                if self.dictation_manager and hasattr(self.dictation_manager, 'set_target_language'):
+                    # Obter o idioma de destino das configurações
+                    target_language = self.config_manager.get_value("translation", "target_language")
+                    self.logger.warning(f"Setting target language for CTRL to: {target_language}")
+                    # Definir diretamente o idioma de destino
+                    self.dictation_manager.set_target_language(target_language)
+                    return
+                    
             # Usar o método existente para definir o idioma
             self._set_language_and_translation_for_key(key_name)
             
