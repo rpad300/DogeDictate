@@ -83,6 +83,9 @@ class HotkeyManager:
             self.button_timeout_thread = None
             self.button_timeout_running = False
             
+            # Initialize callback for UI updates
+            self.update_ui_callback = None
+            
             self.logger.info("Hotkey manager initialized")
         except Exception as e:
             # Use a print statement if logger might not be initialized yet
@@ -90,9 +93,33 @@ class HotkeyManager:
             print(traceback.format_exc())
     
     def _create_language_hotkeys_dict(self):
-        """Create a dictionary of language hotkeys for quick lookup"""
-        self.language_hotkeys_dict = {hotkey.get('key'): hotkey for hotkey in self.language_hotkeys}
-        self.logger.debug(f"Created language_hotkeys_dict with {len(self.language_hotkeys_dict)} entries")
+        """Create a dictionary for faster hotkey lookup"""
+        self.language_hotkeys_dict = {}
+        
+        # Log para depuração
+        self.logger.debug("Criando dicionário de hotkeys de idioma")
+        
+        for hotkey in self.language_hotkeys:
+            # Verificar se a configuração da hotkey é válida
+            if "key" in hotkey and "language" in hotkey:
+                key = hotkey["key"]
+                
+                # Verificar se é uma tecla modificadora
+                is_modifier = key in ['ctrl', 'alt', 'shift', 'cmd']
+                if is_modifier:
+                    self.logger.info(f"Tecla modificadora {key} configurada como hotkey de idioma para {hotkey['language']}")
+                    # Para teclas modificadoras, garantir que não haja modificadores
+                    hotkey_copy = hotkey.copy()
+                    hotkey_copy["modifiers"] = []
+                    self.language_hotkeys_dict[key] = hotkey_copy
+                else:
+                    # Para teclas normais, usar a configuração normal
+                    self.language_hotkeys_dict[key] = hotkey
+            else:
+                self.logger.warning(f"Configuração de hotkey inválida: {hotkey}")
+        
+        # Log do dicionário criado
+        self.logger.debug(f"Dicionário de hotkeys de idioma: {self.language_hotkeys_dict}")
     
     def _register_valid_hotkeys(self):
         """Register all valid hotkeys for monitoring"""
@@ -323,46 +350,51 @@ class HotkeyManager:
             return False
     
     def update_language_hotkey(self, index, key, modifiers, language):
-        """Update a language hotkey configuration"""
+        """Atualizar uma hotkey de idioma"""
         try:
-            # Obter a lista atual de hotkeys de linguagem
-            language_hotkeys = self.config_manager.get_value("hotkeys", "language_hotkeys", [])
-            
-            # Verificar se language_hotkeys é uma lista válida
-            if not isinstance(language_hotkeys, list):
-                self.logger.error(f"Invalid language_hotkeys configuration: {language_hotkeys}, resetting to empty list")
-                language_hotkeys = []
-            
-            # Criar a configuração da hotkey
-            hotkey_config = {"key": key, "modifiers": modifiers, "language": language}
-            
-            # Atualizar ou adicionar a hotkey
-            if 0 <= index < len(language_hotkeys):
-                language_hotkeys[index] = hotkey_config
-            else:
-                language_hotkeys.append(hotkey_config)
-            
-            # Salvar a lista completa de hotkeys de linguagem
-            result = self.config_manager.set_value("hotkeys", "language_hotkeys", language_hotkeys)
-            
-            # Atualizar a lista local
-            if result:
-                self.language_hotkeys = language_hotkeys
-                self.logger.info(f"Updated language hotkey at index {index}: key={key}, modifiers={modifiers}, language={language}")
-            
-            # Salvar a configuração
-            self.config_manager.save_config()
-            
-            # Limpar o dicionário de teclas de idioma pressionadas para evitar problemas
-            self.language_pressed = {}
-            
             # Log para depuração
-            self.logger.info(f"Language hotkeys after update: {self.language_hotkeys}")
+            self.logger.info(f"Atualizando hotkey de idioma {index}: key={key}, modifiers={modifiers}, language={language}")
             
-            return result
+            # Verificar se é uma tecla modificadora
+            is_modifier = key in ['ctrl', 'alt', 'shift', 'cmd']
+            if is_modifier:
+                self.logger.info(f"Tecla modificadora {key} sendo configurada como hotkey de idioma")
+                # Garantir que a configuração de modificador esteja correta para teclas modificadoras
+                modifiers = [] # Teclas modificadoras não devem ter modificadores quando usadas como hotkey principal
+            
+            # Verificar se já existe uma hotkey para o índice especificado
+            needs_create = True
+            if index < len(self.language_hotkeys):
+                self.language_hotkeys[index] = {
+                    "key": key,
+                    "modifiers": modifiers,
+                    "language": language
+                }
+                needs_create = False
+                
+            # Se precisar criar, adicionar à lista
+            if needs_create:
+                self.language_hotkeys.append({
+                    "key": key,
+                    "modifiers": modifiers,
+                    "language": language
+                })
+                
+            # Salvar na configuração
+            self.config_manager.set_value("hotkeys", "language_hotkeys", self.language_hotkeys)
+            
+            # Atualizar dicionário para referência rápida
+            self._create_language_hotkeys_dict()
+            
+            # Log da atualização concluída
+            self.logger.info(f"Hotkey de idioma {index} atualizada com sucesso")
+            self._log_language_hotkeys()
+            
+            return True
             
         except Exception as e:
-            self.logger.error(f"Error updating language hotkey configuration: {str(e)}")
+            self.logger.error(f"Erro ao atualizar hotkey de idioma: {str(e)}")
+            import traceback
             self.logger.error(traceback.format_exc())
             return False
     
@@ -562,144 +594,225 @@ class HotkeyManager:
             # Se for forward button, usar sempre mouse_forward como nome padrão
             if is_forward_button:
                 button_name = 'mouse_forward'
-                self.logger.debug(f"Mouse forward button detectado e normalizado para 'mouse_forward'")
+                self.logger.info(f"Mouse forward button detectado e normalizado para 'mouse_forward'")
             
+            # Lista concreta de nomes de botões do mouse para verificação
+            mouse_button_names = [
+                'mouse_left', 'mouse_right', 'mouse_middle', 
+                'mouse_forward', 'mouse_back', 'mouse_button3', 
+                'mouse_button4', 'mouse_button5'
+            ]
+            
+            # Verificar se é um botão válido do mouse
+            if not any(name in button_name for name in ['mouse_', 'button']):
+                self.logger.warning(f"Botão de mouse inválido: {button_name}, ignorando")
+                return
+                
             # Verificar se é o botão de push-to-talk específico
             push_to_talk_key = None
             if self.push_to_talk and 'key' in self.push_to_talk:
                 push_to_talk_key = self.push_to_talk['key']
 
             # Verificar se é uma language hotkey
-            is_language_hotkey = button_name in self.language_hotkeys_dict
-            
-            # Se for pressionado, adicionar à lista de teclas pressionadas
-            if pressed:
-                if button_name not in self.current_keys:
-                    self.current_keys.add(button_name)
-                    self.logger.debug(f"Adicionado botão {button_name} à lista de teclas pressionadas")
-                
-                # Armazenar hora do pressionamento para debounce
-                current_time = time.time()
-                self.key_press_times[button_name] = current_time
-            else:
-                # Se for liberado, remover da lista de teclas pressionadas
-                if button_name in self.current_keys:
-                    self.current_keys.remove(button_name)
-                    self.logger.debug(f"Removido botão {button_name} da lista de teclas pressionadas")
-            
-            # Verificar modificadores necessários para botões configurados
-            required_modifiers = []
-            
-            if is_language_hotkey and 'modifiers' in self.language_hotkeys_dict[button_name]:
-                required_modifiers = self.language_hotkeys_dict[button_name]['modifiers']
-            elif button_name == push_to_talk_key and 'modifiers' in self.push_to_talk:
-                required_modifiers = self.push_to_talk['modifiers']
-            
-            # Verificar se todos os modificadores necessários estão pressionados
-            all_modifiers_pressed = True
-            for modifier in required_modifiers:
-                if modifier not in self.current_keys:
-                    all_modifiers_pressed = False
-                    self.logger.debug(f"Modificador {modifier} necessário para {button_name} não está pressionado")
+            is_language_hotkey = False
+            for hotkey in self.language_hotkeys:
+                if 'key' in hotkey and hotkey['key'] == button_name:
+                    is_language_hotkey = True
                     break
+                    
+            # Log para debugging
+            self.logger.info(f"Mouse {'Press' if pressed else 'Release'}: {button_name}")
+            self.logger.info(f"  - Is push-to-talk: {button_name == push_to_talk_key}")
+            self.logger.info(f"  - Is language hotkey: {is_language_hotkey}")
             
-            # Tratar todos os botões de mouse configurados como push-to-talk
-            if (is_language_hotkey or (button_name == push_to_talk_key)) and all_modifiers_pressed:
-                if pressed:
-                    # Iniciar gravação com o idioma apropriado
-                    if is_language_hotkey:
-                        self.logger.info(f"Tecla de idioma pressionada: {button_name}")
-                        self._force_language_hotkey_activation(button_name)
-                    else:
-                        self.logger.info(f"Push-to-talk pressionado: {button_name}")
-                        self._force_push_to_talk_activation(button_name)
-                else:
-                    # Parar gravação ao soltar o botão
-                    if is_language_hotkey:
-                        self.logger.info(f"Tecla de idioma liberada: {button_name}")
-                        self._force_language_hotkey_deactivation(button_name)
-                    else:
-                        self.logger.info(f"Push-to-talk liberado: {button_name}")
-                        self._force_push_to_talk_deactivation(button_name)
+            # Handle button press
+            if pressed:
+                # Adicionar uma chave especial para o mouse para evitar confusão com teclas
+                mouse_key = f"MOUSE_EVENT_{button_name}"
+                self.current_keys.add(mouse_key)
+                self.logger.info(f"Added {button_name} to current keys as {mouse_key}")
+                
+                # Evitar confusão com a tecla ctrl - marcar explicitamente como mouse button
+                if is_forward_button:
+                    self.logger.info("Mouse forward button pressed - this is NOT a keyboard ctrl key")
+                
+                # Se for o botão de push-to-talk, iniciar ditado
+                if button_name == push_to_talk_key:
+                    self.logger.info(f"Push-to-talk: mouse button {button_name} pressed")
+                    # Armazenar hora do pressionamento para debounce
+                    current_time = time.time()
+                    self.key_press_times[button_name] = current_time
+                    self._force_push_to_talk_activation(button_name)
+                
+                # Se for uma hotkey de idioma, forçar ativação
+                elif is_language_hotkey:
+                    self.logger.info(f"Language hotkey: mouse button {button_name} pressed")
+                    self._force_language_hotkey_activation(button_name)
             
-        except Exception as e:
-            self.logger.error(f"Error handling mouse click: {str(e)}")
-            self.logger.error(traceback.format_exc())
-            
-    def _force_language_hotkey_activation(self, key_name):
-        """Força a ativação de uma tecla de idioma com comportamento push-to-talk
+            # Handle button release
+            else:
+                # Remover a chave especial para o mouse
+                mouse_key = f"MOUSE_EVENT_{button_name}"
+                self.current_keys.discard(mouse_key)
+                self.logger.info(f"Removed {mouse_key} from current keys")
+                
+                # Se for o botão de push-to-talk, parar ditado
+                if button_name == push_to_talk_key:
+                    self.logger.info(f"Push-to-talk: mouse button {button_name} released")
+                    self._force_push_to_talk_deactivation(button_name)
+                
+                # Se for uma hotkey de idioma, forçar desativação
+                elif is_language_hotkey:
+                    self.logger.info(f"Language hotkey: mouse button {button_name} released")
+                    self._force_language_hotkey_deactivation(button_name)
         
-        Args:
-            key_name: The name of the language hotkey
-        """
+        except Exception as e:
+            self.logger.error(f"Error in _on_mouse_click: {str(e)}")
+            self.logger.error(traceback.format_exc())
+    
+    def _force_language_hotkey_activation(self, key_name):
+        """Force the activation of a language hotkey, with the same behavior as push-to-talk"""
         try:
-            # Parar qualquer gravação em andamento
+            if not self.dictation_manager:
+                self.logger.warning("Dictation manager not set, cannot force language hotkey activation")
+                return
+
+            if not self.language_rules:
+                self.logger.warning("Language rules not set, cannot force language hotkey activation")
+                return
+
+            # Verificar se a tecla é uma language hotkey
+            if key_name not in self.language_hotkeys_dict:
+                self.logger.debug(f"Key {key_name} is not a language hotkey")
+                return
+                
+            # Obter configuração da hotkey
+            hotkey_config = self.language_hotkeys_dict[key_name]
+            self.logger.info(f"Found language hotkey config: {hotkey_config}")
+
+            # Tratar language hotkeys como push-to-talk (inicia a gravação)
+            # Primeiramente, parar qualquer ditado em andamento para garantir estado limpo
             if self.dictation_manager:
                 try:
+                    # Verificar se está gravando
                     is_recording = False
                     try:
                         is_recording = self.dictation_manager.is_recording
                     except Exception as e:
-                        self.logger.error(f"Erro verificando gravação: {str(e)}")
+                        self.logger.error(f"Erro verificando estado de gravação: {str(e)}")
                     
+                    # Se estiver gravando, parar
                     if is_recording:
-                        self.logger.info("Parando gravação anterior antes de iniciar nova com idioma específico")
+                        self.logger.info("Parando gravação anterior antes de iniciar nova")
                         self.dictation_manager.stop_dictation()
-                        time.sleep(0.1)
+                        time.sleep(0.1)  # Pequena pausa para garantir que parou
                 except Exception as e:
-                    self.logger.error(f"Erro parando gravação anterior: {str(e)}")
+                    self.logger.error(f"Erro parando ditado existente: {str(e)}")
+
+            # Obter o idioma de reconhecimento da tecla
+            recognition_language = hotkey_config.get("language")
             
-            # Definir idioma específico da tecla de idioma
-            try:
-                if key_name in self.language_hotkeys_dict:
-                    language_settings = self.language_hotkeys_dict[key_name]
-                    self.logger.info(f"Definindo idioma a partir da tecla {key_name}: {language_settings.get('language')}")
-                    
-                    if self.language_rules and self.dictation_manager:
-                        self.language_rules.apply_language_settings(self.dictation_manager, "language_hotkey", language_settings)
-                    else:
-                        self.logger.error("Não foi possível definir idioma: gerenciador não disponível")
-                else:
-                    self.logger.error(f"Tecla de idioma não encontrada: {key_name}")
-            except Exception as e:
-                self.logger.error(f"Erro definindo idioma para tecla {key_name}: {str(e)}")
-            
-            # Iniciar gravação com o novo idioma
-            if self.dictation_manager:
-                try:
-                    time.sleep(0.05)  # Pequena pausa para garantir que as configurações de idioma foram aplicadas
-                    self.logger.info(f"Iniciando ditado com idioma da tecla {key_name}")
-                    self.emit("start_dictation")
-                except Exception as e:
-                    self.logger.error(f"Erro iniciando ditado: {str(e)}")
+            # Verificar se há um idioma de destino específico para esta tecla
+            key_targets = self.config_manager.get_value("language_rules", "key_targets", {})
+            if isinstance(key_targets, dict) and key_name in key_targets:
+                target_language = key_targets[key_name]
+                self.logger.info(f"Using target language from key_targets: {target_language}")
             else:
-                self.logger.error("Dictation manager não disponível")
+                # Se não tiver target específico, usar o mesmo idioma de reconhecimento
+                target_language = recognition_language
+                self.logger.info(f"No specific target language found, using recognition language: {target_language}")
+            
+            # Criar configuração completa para aplicar
+            complete_config = hotkey_config.copy()
+            complete_config["target_language"] = target_language
+            
+            # Aplicar as regras de idioma
+            self.logger.info(f"Applying language settings for key {key_name}: {recognition_language} -> {target_language}")
+            self.language_rules.apply_language_settings(self.dictation_manager, "language_hotkey", complete_config)
+            
+            # Preparar mensagem de notificação
+            try:
+                recognition_lang_name = self._get_language_display_name(recognition_language)
+                target_lang_name = self._get_language_display_name(target_language)
+                
+                if recognition_language == target_language:
+                    msg = f"Ditando em {recognition_lang_name}"
+                else:
+                    msg = f"Ditando em {recognition_lang_name} (tradução para {target_lang_name})"
+                
+                self.logger.info(f"Notificação de idioma: {msg}")
+                
+                # Mostrar notificação se o método existir
+                if hasattr(self.dictation_manager, 'show_notification'):
+                    self.dictation_manager.show_notification(msg, "info", 2000)
+            except Exception as notification_error:
+                self.logger.warning(f"Error showing language notification: {str(notification_error)}")
+            
+            # Atualizar a interface do usuário (se o callback estiver disponível)
+            if hasattr(self, 'update_ui_callback') and self.update_ui_callback:
+                self.update_ui_callback()
+                
+            # Iniciar a ditado - COMPORTAMENTO IGUAL AO PUSH-TO-TALK
+            self.push_to_talk_active = True  # Marcar como ativo mesmo para teclas de idioma
+            if self.dictation_manager:
+                # Verificar se já está gravando
+                is_recording = False
+                try:
+                    is_recording = self.dictation_manager.is_recording
+                except Exception as e:
+                    pass
+                
+                if not is_recording:
+                    # Aguardar um momento para garantir configuração
+                    time.sleep(0.05)
+                    self.logger.info(f"Iniciando ditado com language hotkey: {key_name}")
+                    self.emit("start_dictation")
+                    
+            return True
             
         except Exception as e:
-            self.logger.error(f"Erro na ativação de tecla de idioma {key_name}: {str(e)}")
+            self.logger.error(f"Error forcing language hotkey activation: {str(e)}")
             self.logger.error(traceback.format_exc())
-            
+            return False
+    
     def _force_language_hotkey_deactivation(self, key_name):
-        """Força a desativação de uma tecla de idioma com comportamento push-to-talk
-        
-        Args:
-            key_name: The name of the language hotkey
-        """
+        """Força a desativação de uma hotkey de idioma com mesmo comportamento do push-to-talk"""
         try:
-            # Parar a gravação
-            if self.dictation_manager:
-                try:
-                    self.logger.info(f"Parando ditado (liberação de tecla de idioma {key_name})")
-                    self.emit("stop_dictation")
-                except Exception as e:
-                    self.logger.error(f"Erro parando ditado: {str(e)}")
+            self.logger.info(f"Forçando desativação da hotkey de idioma: {key_name}")
+            
+            # Verificar se a tecla está configurada como hotkey de idioma
+            if key_name in self.language_hotkeys_dict:
+                # Desativar push-to-talk (mesmo para teclas de idioma)
+                was_active = self.push_to_talk_active
+                self.push_to_talk_active = False
+                self.logger.info(f"Desativando modo de ditado para language hotkey: {key_name}")
+                
+                # Parar o ditado se o dictation_manager existir
+                if self.dictation_manager:
+                    try:
+                        # Verificar se está gravando
+                        is_recording = False
+                        try:
+                            is_recording = self.dictation_manager.is_recording
+                        except Exception as e:
+                            self.logger.error(f"Erro verificando estado de gravação: {str(e)}")
+                        
+                        # Se estiver gravando, parar
+                        if is_recording:
+                            self.logger.info(f"Parando ditado (liberação de tecla de idioma {key_name})")
+                            self.emit("stop_dictation")
+                    except Exception as e:
+                        self.logger.error(f"Erro parando ditado: {str(e)}")
+                        self.logger.error(traceback.format_exc())
+                else:
+                    self.logger.warning(f"Dictation manager não disponível")
             else:
-                self.logger.error("Dictation manager não disponível")
+                self.logger.warning(f"Tecla {key_name} não está configurada como hotkey de idioma")
                 
         except Exception as e:
-            self.logger.error(f"Erro na desativação de tecla de idioma {key_name}: {str(e)}")
+            self.logger.error(f"Erro ao forçar desativação de hotkey de idioma: {str(e)}")
             self.logger.error(traceback.format_exc())
-            
+    
     def _on_key_press(self, key):
         """Handler for key press events"""
         try:
@@ -718,62 +831,75 @@ class HotkeyManager:
             self.logger.error(traceback.format_exc())
             
     def _on_key_press_internal(self, key_name):
-        """Processamento interno de tecla pressionada"""
+        """Handle key press internally"""
         try:
-            # Verificar se a tecla é um modificador (ctrl, alt, shift)
-            is_modifier = key_name in ['ctrl', 'alt', 'shift', 'cmd']
+            # Log para depuração
+            self.logger.debug(f"Key pressed (internal): {key_name}")
             
-            # Apenas adicionar à lista de teclas pressionadas se for um modificador ou tecla configurada
-            if is_modifier or (
-                key_name == self.push_to_talk_key or 
-                key_name == self.toggle_key or 
-                key_name in self.language_hotkeys_dict
-            ):
-                # Adicionar tecla à lista de teclas pressionadas se ainda não estiver
-                if key_name not in self.current_keys:
-                    self.current_keys.add(key_name)
-                    self.logger.debug(f"Adicionada tecla {key_name} à lista de teclas pressionadas")
+            # Se a tecla não for uma tecla conhecida, ignorar
+            if not key_name:
+                return
+            
+            # Verificar se a tecla já foi processada (já está no conjunto de teclas pressionadas)
+            # Isso previne que teclas mantidas pressionadas gerem múltiplos eventos
+            if key_name in self.current_keys:
+                # Se for uma tecla modificadora como Ctrl, verificar tempo desde último processamento
+                if key_name in ['ctrl', 'alt', 'shift', 'cmd']:
+                    current_time = time.time()
+                    last_press = self.key_press_times.get(key_name, 0)
+                    
+                    # Só notificar a cada 1 segundo para teclas mantidas pressionadas
+                    # Isso permite que a tecla seja usada para outras combinações, mas não dispare eventos repetidos
+                    if current_time - last_press < 1.0:
+                        self.logger.debug(f"Tecla {key_name} já está pressionada, ignorando evento repetido")
+                        return
+                    else:
+                        # Se passou mais de 1 segundo, atualizar o timestamp mas não reprocessar
+                        # a menos que seja um evento de liberação-pressão rápida
+                        self.key_press_times[key_name] = current_time
+                        self.logger.debug(f"Tecla {key_name} mantida pressionada por 1 segundo, atualizando timestamp")
+                        return
+                else:
+                    # Para teclas normais, ignorar completamente se já estiver pressionada
+                    self.logger.debug(f"Tecla {key_name} já está pressionada, ignorando evento repetido")
+                    return
                 
-                # Armazenar hora do pressionamento para debounce
-                current_time = time.time()
-                self.key_press_times[key_name] = current_time
+            # Armazenar hora do pressionamento
+            current_time = time.time()
+            self.key_press_times[key_name] = current_time
             
-            # Verificar se a tecla está configurada para alguma ação
-            is_push_to_talk = key_name == self.push_to_talk_key
-            is_toggle = key_name == self.toggle_key
+            # Adicionar à lista de teclas pressionadas
+            self.current_keys.add(key_name)
+            
+            # Verificar se é uma tecla de idioma
             is_language_hotkey = key_name in self.language_hotkeys_dict
             
-            # Verificar modificadores necessários para teclas configuradas
-            required_modifiers = []
-            
-            if is_push_to_talk and 'modifiers' in self.push_to_talk:
-                required_modifiers = self.push_to_talk['modifiers']
-            elif is_toggle and 'modifiers' in self.hands_free:
-                required_modifiers = self.hands_free['modifiers']
-            elif is_language_hotkey and 'modifiers' in self.language_hotkeys_dict[key_name]:
-                required_modifiers = self.language_hotkeys_dict[key_name]['modifiers']
-            
-            # Verificar se todos os modificadores necessários estão pressionados
-            all_modifiers_pressed = True
-            for modifier in required_modifiers:
-                if modifier not in self.current_keys:
-                    all_modifiers_pressed = False
-                    self.logger.debug(f"Modificador {modifier} necessário para {key_name} não está pressionado")
-                    break
-            
-            # Se a tecla for configurada e todos os modificadores necessários estiverem pressionados
-            if is_push_to_talk and all_modifiers_pressed:
-                # Tratamento especial para ctrl push-to-talk
-                self.logger.info(f"Tecla push-to-talk pressionada: {key_name}")
-                self._force_push_to_talk_activation(key_name)
-            elif is_toggle and all_modifiers_pressed:
-                self._handle_toggle_key(key_name)
-            elif is_language_hotkey and all_modifiers_pressed:
+            # Log para debug
+            if is_language_hotkey:
                 self.logger.info(f"Tecla de idioma pressionada (teclado): {key_name}")
                 self._force_language_hotkey_activation(key_name)
             
+            # Verificar se é a tecla push-to-talk
+            if key_name == self.push_to_talk_key:
+                self.logger.info(f"Push-to-talk pressionado: {key_name}")
+                self._handle_push_to_talk(key_name)
+            
+            # Verificar se é a tecla toggle (hands-free)
+            if key_name == self.toggle_key:
+                self.logger.info(f"Toggle pressionado: {key_name}")
+                self._handle_toggle_key(key_name)
+            
+            # Verificar se é uma tecla modificadora
+            is_modifier = key_name in ['ctrl', 'shift', 'alt', 'cmd']
+            if is_modifier:
+                # Se for a tecla control, verificar se é uma language hotkey
+                if key_name == 'ctrl' and key_name in self.language_hotkeys_dict:
+                    self.logger.debug(f"Ctrl pressionado como hotkey de idioma")
+                else:
+                    self.logger.debug(f"Tecla modificadora pressionada: {key_name}")
+        
         except Exception as e:
-            self.logger.error(f"Error in _on_key_press_internal: {str(e)}")
+            self.logger.error(f"Error in key press handler: {str(e)}")
             self.logger.error(traceback.format_exc())
             
     def _on_key_release(self, key):
@@ -785,7 +911,7 @@ class HotkeyManager:
             # Ignorar teclas vazias ou inválidas
             if not key_name:
                 return
-                
+            
             # Processar o evento internamente
             self._on_key_release_internal(key_name)
             
@@ -841,12 +967,15 @@ class HotkeyManager:
             # Se for uma tecla de idioma, encerrar o ditado de idioma
             elif is_language_hotkey:
                 self.logger.info(f"Tecla de idioma liberada (teclado): {key_name}")
-                self._force_language_hotkey_deactivation(key_name)
+                # Parar o ditado ao liberar tecla de idioma, comportamento igual ao push-to-talk
+                self.logger.info(f"Parando ditado (liberação de tecla de idioma {key_name})")
+                self.push_to_talk_active = False
+                self.emit("stop_dictation")
             
         except Exception as e:
             self.logger.error(f"Error in _on_key_release_internal: {str(e)}")
             self.logger.error(traceback.format_exc())
-            
+    
     def _check_key_combinations_on_modifier_release(self, modifier_key):
         """Verifica se alguma combinação de teclas estava ativa com este modificador"""
         try:
@@ -865,6 +994,34 @@ class HotkeyManager:
         
         except Exception as e:
             self.logger.error(f"Error checking key combinations on modifier release: {str(e)}")
+            self.logger.error(traceback.format_exc())
+    
+    def _handle_push_to_talk_key(self, pressed):
+        """Handle push-to-talk key press/release
+        
+        Args:
+            pressed (bool): Whether the key is pressed or released
+        """
+        try:
+            if pressed:
+                # Iniciar ditado se não estiver em timeout
+                current_time = time.time()
+                last_press = self.key_press_times.get(self.push_to_talk_key, 0)
+                
+                # Verificar debounce
+                if current_time - last_press >= self.push_to_talk_debounce:
+                    self.logger.info(f"Ativando push-to-talk")
+                    self.key_press_times[self.push_to_talk_key] = current_time
+                    self._force_push_to_talk_activation(self.push_to_talk_key)
+                else:
+                    self.logger.info(f"Ignorando ativação de push-to-talk (debounce): {current_time - last_press:.2f}s")
+            else:
+                # Parar ditado ao soltar a tecla
+                self.logger.info(f"Desativando push-to-talk")
+                self._force_push_to_talk_deactivation(self.push_to_talk_key)
+        
+        except Exception as e:
+            self.logger.error(f"Error handling push-to-talk key: {str(e)}")
             self.logger.error(traceback.format_exc())
     
     def _handle_push_to_talk(self, key_name):
@@ -890,7 +1047,7 @@ class HotkeyManager:
             # Verificar se devemos definir o idioma
             try:
                 # Definir idioma de acordo com a tecla pressionada
-                self._set_language_for_push_to_talk(key_name)
+                self._set_language_and_translation_for_key(key_name)
                 
                 # Iniciar a ditado se o dictation_manager existir
                 if self.dictation_manager:
@@ -944,8 +1101,6 @@ class HotkeyManager:
                 if is_recording:
                     self.logger.info("Stopping dictation")
                     self.emit("stop_dictation")
-                else:
-                    self.logger.debug("Dictation not recording, no need to stop")
             else:
                 self.logger.error("No dictation manager available")
             
@@ -989,58 +1144,86 @@ class HotkeyManager:
             key_name (str): The name of the key pressed
         """
         try:
-            # If it's a language hotkey, use the language from the hotkey
+            self.logger.info(f"Configurando idioma para a tecla: {key_name}")
+            
+            # Se for push-to-talk (mouse_forward), configurar para traduzir para inglês
+            if key_name == self.push_to_talk_key or key_name == "mouse_forward":
+                self.logger.info(f"Configurando idioma para push-to-talk key: {key_name}")
+                
+                # Para push-to-talk, queremos reconhecer em português e traduzir para inglês
+                recognition_language = "pt-PT"  # Português de Portugal para reconhecimento
+                target_language = "en-US"      # Inglês para tradução
+                
+                # Configurar a aplicação para usar esses idiomas
+                if self.dictation_manager and hasattr(self.dictation_manager, 'set_language'):
+                    self.dictation_manager.set_language(recognition_language)
+                
+                if self.dictation_manager and hasattr(self.dictation_manager, 'set_target_language'):
+                    self.dictation_manager.set_target_language(target_language)
+                
+                # Ativar tradução automática
+                if self.dictation_manager and hasattr(self.dictation_manager, 'set_auto_translate'):
+                    self.dictation_manager.set_auto_translate(True)
+                
+                # Mostrar notificação de idioma
+                message = f"Ditando em Português (Portugal) → Traduzindo para English (US)"
+                self.logger.info(f"Push-to-talk: {message}")
+                self.emit("show_notification", message, "info", 2000)
+                
+                return
+            
+            # Se for uma language hotkey (exemplo: ctrl), usar as configurações da hotkey
             if key_name in self.language_hotkeys_dict:
-                language = self.language_hotkeys_dict[key_name].get("language")
-                self.logger.info(f"Setting language from hotkey {key_name}: {language}")
-                self.language_rules.apply_language_settings(self.dictation_manager, "language_hotkey", 
-                                                           self.language_hotkeys_dict[key_name])
-            # If it's the push-to-talk key, use the language rules for push-to-talk
-            elif key_name == self.push_to_talk_key:
-                self.logger.info(f"Setting language for push-to-talk key: {key_name}")
-                self.language_rules.apply_language_settings(self.dictation_manager, "push_to_talk")
-            else:
-                # Use default language settings
-                self.logger.info(f"No specific language for key {key_name}, using default settings")
+                hotkey_config = self.language_hotkeys_dict[key_name]
+                language = hotkey_config.get("language", "pt-PT")  # Padrão para pt-PT se não especificado
+                self.logger.info(f"Configurando language hotkey {key_name} para usar: {language}")
+                
+                # Verificar se há um idioma de destino configurado para esta tecla
+                key_targets = self.config_manager.get_value("language_rules", "key_targets", {})
+                if isinstance(key_targets, dict) and key_name in key_targets:
+                    target_language = key_targets[key_name]
+                    self.logger.info(f"Usando target language da configuração para {key_name}: {target_language}")
+                else:
+                    # Para a tecla ctrl, garantir que seja pt-PT
+                    if key_name == "ctrl":
+                        target_language = "pt-PT"
+                        self.logger.info(f"Definindo target language para ctrl como pt-PT")
+                    else:
+                        # Para outras teclas, usar o idioma da hotkey ou o padrão
+                        target_language = language
+                    
+                # Configurar a aplicação para usar esses idiomas
+                if self.dictation_manager and hasattr(self.dictation_manager, 'set_language'):
+                    self.dictation_manager.set_language(language)
+                
+                if self.dictation_manager and hasattr(self.dictation_manager, 'set_target_language'):
+                    self.dictation_manager.set_target_language(target_language)
+                
+                # Ativar tradução automática se os idiomas forem diferentes
+                auto_translate = language != target_language
+                if self.dictation_manager and hasattr(self.dictation_manager, 'set_auto_translate'):
+                    self.dictation_manager.set_auto_translate(auto_translate)
+                
+                # Mostrar notificação de idioma
+                if language == target_language:
+                    message = f"Ditando em {self._get_language_display_name(language)}"
+                else:
+                    message = f"Ditando em {self._get_language_display_name(language)} → Traduzindo para {self._get_language_display_name(target_language)}"
+                
+                self.logger.info(f"Language hotkey: {message}")
+                self.emit("show_notification", message, "info", 2000)
+                
+                return
+                
+            # Se chegar aqui, usar configurações padrão
+            self.logger.info(f"Nenhuma configuração específica para tecla {key_name}, usando padrões")
+            
+            # Usar regras de idioma padrão para outras teclas
+            if self.language_rules:
                 self.language_rules.apply_language_settings(self.dictation_manager, "default")
+            
         except Exception as e:
             self.logger.error(f"Error setting language for key {key_name}: {str(e)}")
-            self.logger.error(traceback.format_exc())
-    
-    def _set_language_for_push_to_talk(self, key_name=None):
-        """Define o idioma com base na tecla de push-to-talk pressionada
-        
-        Esta função é um wrapper para _set_language_and_translation_for_key
-        que é chamada quando uma tecla de push-to-talk é pressionada.
-        
-        Args:
-            key_name (str, optional): Nome da tecla de push-to-talk pressionada. 
-                                     Se não for fornecido, usa self.push_to_talk_key.
-        """
-        try:
-            self.logger.info(f"Setting language for push-to-talk with key: {key_name}")
-            
-            # Se key_name não foi fornecido, usar o push_to_talk_key padrão
-            if key_name is None:
-                key_name = self.push_to_talk_key
-            
-            # Tratamento especial para a tecla ctrl
-            if key_name == "ctrl":
-                self.logger.warning(f"Special handling for CTRL key in push-to-talk")
-                # Verificar se temos um DictationManager válido
-                if self.dictation_manager and hasattr(self.dictation_manager, 'set_target_language'):
-                    # Obter o idioma de destino das configurações
-                    target_language = self.config_manager.get_value("translation", "target_language")
-                    self.logger.warning(f"Setting target language for CTRL to: {target_language}")
-                    # Definir diretamente o idioma de destino
-                    self.dictation_manager.set_target_language(target_language)
-                    return
-                    
-            # Usar o método existente para definir o idioma
-            self._set_language_and_translation_for_key(key_name)
-            
-        except Exception as e:
-            self.logger.error(f"Error in _set_language_for_push_to_talk: {str(e)}")
             self.logger.error(traceback.format_exc())
 
     def load_config(self):
@@ -1087,21 +1270,31 @@ class HotkeyManager:
             # Log detalhado para diagnóstico de todos os botões
             self.logger.info(f"Mouse button raw: {button}, type={type(button)}")
             
+            # Verificar se é um evento de botão e não um evento de teclado
+            if not hasattr(button, 'name') and not hasattr(button, 'button') and str(button).startswith('<Key.'):
+                self.logger.warning(f"Evento de teclado detectado incorretamente como mouse: {button}")
+                return f"invalid_mouse_event_{str(button)}"
+            
             # Tenta obter o nome do botão a partir do objeto
             if hasattr(button, 'name'):
                 name = button.name
                 # Converter para minúsculo e substituir aspas
                 if isinstance(name, str):
                     name = name.lower().replace("'", "")
-                    # Adicionar prefixo 'mouse_' para diferenciar dos botões do teclado
-                    self.logger.info(f"Mouse button with name attribute: mouse_{name}")
                     
-                    # Mapear nomes específicos para os botões X1 e X2
-                    if name in ['x1', 'back', 'x_1', 'button4']:
-                        return 'mouse_back'
-                    elif name in ['x2', 'forward', 'x_2', 'button5']:
+                    # Verificação adicional para o mouse_forward (X2)
+                    # Os nomes comuns para o botão "forward" são x2, button5, etc.
+                    if name in ['x2', 'forward', 'x_2', 'button5']:
+                        self.logger.info("Forward mouse button (X2) detected via name")
                         return 'mouse_forward'
                     
+                    # Os nomes comuns para o botão "back" são x1, button4, etc.
+                    if name in ['x1', 'back', 'x_1', 'button4']:
+                        self.logger.info("Back mouse button (X1) detected via name")
+                        return 'mouse_back'
+                    
+                    # Adicionar prefixo 'mouse_' para diferenciar dos botões do teclado
+                    self.logger.info(f"Mouse button with name attribute: mouse_{name}")
                     return f"mouse_{name}"
             
             # Tenta converter para string e examinar o conteúdo
@@ -1119,6 +1312,7 @@ class HotkeyManager:
             elif any(x in button_str for x in ['button.x1', 'button.back', 'back', 'button4', 'x1']):
                 return 'mouse_back'
             elif any(x in button_str for x in ['button.x2', 'button.forward', 'forward', 'button5', 'x2']):
+                self.logger.info("Forward mouse button (X2) detected via string pattern")
                 return 'mouse_forward'
             
             # Se for um dos botões extras numerados
@@ -1130,19 +1324,23 @@ class HotkeyManager:
                     if num == 4 or num == 8:  # Valores comuns para o botão "back"
                         return 'mouse_back'
                     elif num == 5 or num == 9:  # Valores comuns para o botão "forward"
+                        self.logger.info(f"Forward mouse button detected via button number: {num}")
                         return 'mouse_forward'
+                    else:
+                        return f'mouse_button{num}'
                 except:
                     pass
             
-            # Se não conseguir identificar, retorna a representação em string
-            mapped_button = f"mouse_{button_str.replace('button.', '')}"
+            # Se não conseguir identificar, retorna a representação em string mas com prefixo mouse_
+            # para evitar confusão com teclas do teclado
+            mapped_button = f"mouse_button_{button_str.replace('button.', '').replace('.', '_')}"
             self.logger.info(f"Unrecognized mouse button, using mapped name: {mapped_button}")
             return mapped_button
             
         except Exception as e:
             self.logger.error(f"Error getting mouse button name: {str(e)}")
             self.logger.error(traceback.format_exc())
-            return 'unknown_button'
+            return 'unknown_mouse_button'
 
     def emit(self, signal_name, *args, **kwargs):
         """Emit a signal to registered handlers
@@ -1170,6 +1368,16 @@ class HotkeyManager:
                     self.dictation_manager.stop_dictation()
                 except Exception as e:
                     self.logger.error(f"Error in stop_dictation: {str(e)}")
+                    self.logger.error(traceback.format_exc())
+            elif signal_name == "show_notification":
+                try:
+                    # Verificar se o dictation_manager tem o método show_notification
+                    if hasattr(self.dictation_manager, 'show_notification'):
+                        self.dictation_manager.show_notification(*args, **kwargs)
+                    else:
+                        self.logger.warning(f"dictation_manager não tem método show_notification: {args}")
+                except Exception as e:
+                    self.logger.error(f"Error in show_notification: {str(e)}")
                     self.logger.error(traceback.format_exc())
             else:
                 self.logger.error(f"Unknown signal: {signal_name}")
@@ -1302,3 +1510,73 @@ class HotkeyManager:
         except Exception as e:
             self.logger.error(f"Error in force push-to-talk deactivation: {str(e)}")
             self.logger.error(traceback.format_exc())
+
+    def _show_language_notification(self, language):
+        """Mostrar notificação de alteração de idioma
+        
+        Args:
+            language (str): Código do idioma que foi definido
+        """
+        try:
+            # Mapeamento amigável de idiomas
+            language_map = {
+                "en-US": "English (US)",
+                "en-GB": "English (UK)",
+                "pt-BR": "Portuguese (Brazil)",
+                "pt-PT": "Portuguese (Portugal)",
+                "es-ES": "Spanish (Spain)",
+                "fr-FR": "French",
+                "de-DE": "German",
+                "it-IT": "Italian",
+                "ja-JP": "Japanese",
+                "zh-CN": "Chinese (Simplified)",
+                "ru-RU": "Russian"
+            }
+            
+            # Obter nome amigável do idioma
+            language_name = language_map.get(language, language)
+            
+            # Obter idioma de destino (para tradução)
+            target_language = self.config_manager.get_value("translation", "target_language", "en-US")
+            target_language_name = language_map.get(target_language, target_language)
+            
+            # Criar mensagem detalhada
+            if target_language != language:
+                message = f"Ditando em {language_name} → Traduzindo para {target_language_name}"
+            else:
+                message = f"Ditando em {language_name} (sem tradução)"
+            
+            # Log para diagnóstico
+            self.logger.info(f"Notificação de idioma: {message}")
+            
+            # Enviar notificação usando o método emit
+            self.emit("show_notification", message, "info", 2000)
+            
+        except Exception as e:
+            self.logger.warning(f"Erro ao mostrar notificação de idioma: {str(e)}")
+            # Não propagar a exceção para evitar interromper o fluxo principal
+
+    def _get_language_display_name(self, language_code):
+        """Get a human-readable display name for a language code
+        
+        Args:
+            language_code (str): The language code (e.g., 'en-US', 'pt-BR')
+            
+        Returns:
+            str: A human-readable language name
+        """
+        language_names = {
+            'en-US': 'English (US)',
+            'en-GB': 'English (UK)',
+            'pt-BR': 'Portuguese (Brazil)',
+            'pt-PT': 'Portuguese (Portugal)',
+            'es-ES': 'Spanish',
+            'fr-FR': 'French',
+            'de-DE': 'German',
+            'it-IT': 'Italian',
+            'ja-JP': 'Japanese',
+            'zh-CN': 'Chinese',
+            'ru-RU': 'Russian'
+        }
+        
+        return language_names.get(language_code, language_code)
