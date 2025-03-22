@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html lang="pt">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Configure Hotkeys - DogeDictate</title>
+  <link rel="stylesheet" href="../styles/main.css">
+  <style>
+    body {
+      padding: 24px;
+      background-color: var(--color-surface);
+      max-width: 500px;
+      margin: 0 auto;
+    }
+
+    .hotkey-group {
+      margin-bottom: var(--spacing-xl);
+    }
+
+    .hotkey-item {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: var(--spacing-md);
+    }
+
+    .hotkey-label {
+      font-weight: 500;
+    }
+
+    .hotkey-input {
+      width: 200px;
+      text-align: center;
+      font-family: monospace;
+    }
+
+    .hotkey-input:focus {
+      outline: none;
+      border-color: var(--color-primary);
+      box-shadow: 0 0 0 2px rgba(75, 46, 131, 0.1);
+    }
+
+    .buttons {
+      display: flex;
+      justify-content: flex-end;
+      gap: var(--spacing-md);
+      margin-top: var(--spacing-xl);
+    }
+  </style>
+</head>
+<body>
+  <div class="content-header">
+    <h1 class="content-title">Configure Hotkeys</h1>
+    <p class="content-subtitle">Set keyboard shortcuts for quick access to DogeDictate features</p>
+  </div>
+
+  <div class="card">
+    <div class="hotkey-group">
+      <h2 class="card-title">Global Controls</h2>
+      
+      <div class="hotkey-item">
+        <span class="hotkey-label">Push to Talk</span>
+        <input type="text" class="form-control hotkey-input" id="push-to-talk" placeholder="Click to record" readonly>
+      </div>
+
+      <div class="hotkey-item">
+        <span class="hotkey-label">Toggle Hands-free Mode</span>
+        <input type="text" class="form-control hotkey-input" id="toggle-hands-free" placeholder="Click to record" readonly>
+      </div>
+
+      <div class="hotkey-item">
+        <span class="hotkey-label">Show/Hide Floating Bar</span>
+        <input type="text" class="form-control hotkey-input" id="toggle-bar" placeholder="Click to record" readonly>
+      </div>
+    </div>
+
+    <div class="hotkey-group">
+      <h2 class="card-title">Language Switching</h2>
+      
+      <div class="hotkey-item">
+        <span class="hotkey-label">Switch to English</span>
+        <input type="text" class="form-control hotkey-input" id="switch-en" placeholder="Click to record" readonly>
+      </div>
+
+      <div class="hotkey-item">
+        <span class="hotkey-label">Switch to Portuguese</span>
+        <input type="text" class="form-control hotkey-input" id="switch-pt" placeholder="Click to record" readonly>
+      </div>
+
+      <div class="hotkey-item">
+        <span class="hotkey-label">Switch to Spanish</span>
+        <input type="text" class="form-control hotkey-input" id="switch-es" placeholder="Click to record" readonly>
+      </div>
+    </div>
+  </div>
+
+  <div class="buttons">
+    <button class="btn btn-outline" id="reset-hotkeys">Reset to Default</button>
+    <button class="btn btn-primary" id="save-hotkeys">Save Changes</button>
+  </div>
+
+  <script src="./hotkeys.js"></script>
+</body>
+</html> 

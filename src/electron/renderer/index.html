@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html lang="pt">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>DogeDictate</title>
+  <link rel="stylesheet" href="../styles/main.css">
+  <link rel="stylesheet" href="https://fonts.googleapis.com/icon?family=Material+Icons">
+</head>
+<body>
+  <div class="container">
+    <!-- Sidebar -->
+    <aside class="sidebar">
+      <div class="sidebar-header">
+        <img src="../assets/logo.png" alt="DogeDictate">
+        <span class="sidebar-title">DogeDictate</span>
+      </div>
+
+      <nav>
+        <a href="#" class="nav-item" data-page="home">
+          <i class="material-icons">home</i>
+          <span>Home</span>
+        </a>
+        <a href="#" class="nav-item" data-page="dictionary">
+          <i class="material-icons">book</i>
+          <span>Dictionary</span>
+        </a>
+        <a href="#" class="nav-item" data-page="history">
+          <i class="material-icons">history</i>
+          <span>History</span>
+        </a>
+        <a href="#" class="nav-item active" data-page="settings">
+          <i class="material-icons">settings</i>
+          <span>Settings</span>
+        </a>
+      </nav>
+
+      <div class="sidebar-footer">
+        <p class="trial-text">Trial ends in 13 days</p>
+        <button class="btn btn-primary">Get Doge Pro</button>
+        <button class="btn btn-secondary">Refer a friend</button>
+        <p class="version-text">Version 1.2.76</p>
+      </div>
+    </aside>
+
+    <!-- Content -->
+    <main class="content">
+      <div class="content-header">
+        <h1 class="content-title">Settings</h1>
+        <p class="content-subtitle">Configure your dictation preferences</p>
+      </div>
+
+      <div class="tabs">
+        <div class="tab active" data-tab="general">General</div>
+        <div class="tab" data-tab="plan">Plan and Billing</div>
+        <div class="tab" data-tab="account">Account</div>
+      </div>
+
+      <!-- General Settings -->
+      <div class="tab-content active" id="general-tab">
+        <!-- Controls -->
+        <div class="card">
+          <h2 class="card-title">Controls</h2>
+          
+          <div class="form-group">
+            <label class="form-label">Hotkeys</label>
+            <button class="btn btn-outline" id="change-hotkeys">Change</button>
+          </div>
+
+          <div class="form-group">
+            <label class="form-label">Set default mic input</label>
+            <select class="form-control" id="mic-input">
+              <option value="">Select a microphone...</option>
+            </select>
+            <p class="mic-status">Mic in use: None</p>
+          </div>
+
+          <div class="form-group">
+            <label class="form-label">Output languages</label>
+            <select class="form-control" id="output-language">
+              <option value="en-US">English (US)</option>
+              <option value="pt-BR">Portuguese (Brazil)</option>
+              <option value="es-ES">Spanish (Spain)</option>
+            </select>
+          </div>
+
+          <div class="form-group">
+            <label class="toggle">
+              <input type="checkbox" id="interaction-sounds">
+              <span class="toggle-slider"></span>
+            </label>
+            <span class="toggle-label">Interaction sounds</span>
+          </div>
+
+          <div class="form-group">
+            <label class="toggle">
+              <input type="checkbox" id="mute-audio">
+              <span class="toggle-slider"></span>
+            </label>
+            <span class="toggle-label">Mute audio during use</span>
+          </div>
+
+          <div class="form-group">
+            <label class="toggle">
+              <input type="checkbox" id="auto-learn" checked>
+              <span class="toggle-slider"></span>
+            </label>
+            <span class="toggle-label">Auto-learn Dictionary words</span>
+          </div>
+        </div>
+
+        <!-- Recognition Service -->
+        <div class="card">
+          <h2 class="card-title">Recognition Service</h2>
+          
+          <div class="form-group">
+            <label class="form-label">Select Service</label>
+            <select class="form-control" id="recognition-service">
+              <option value="whisper">Whisper (OpenAI)</option>
+              <option value="azure">Azure Speech Services</option>
+              <option value="google">Google Speech-to-Text</option>
+            </select>
+          </div>
+
+          <!-- Service specific settings will be shown/hidden based on selection -->
+          <div class="service-settings" id="whisper-settings">
+            <div class="form-group">
+              <label class="form-label">API Key</label>
+              <input type="password" class="form-control" id="whisper-key" placeholder="Enter your OpenAI API key">
+              <button class="btn btn-outline" id="test-whisper">Test Connection</button>
+            </div>
+          </div>
+
+          <div class="service-settings" id="azure-settings" style="display: none;">
+            <div class="form-group">
+              <label class="form-label">API Key</label>
+              <input type="password" class="form-control" id="azure-key" placeholder="Enter your Azure API key">
+            </div>
+            <div class="form-group">
+              <label class="form-label">Region</label>
+              <input type="text" class="form-control" id="azure-region" placeholder="e.g., westus, eastus">
+              <button class="btn btn-outline" id="test-azure">Test Connection</button>
+            </div>
+          </div>
+
+          <div class="service-settings" id="google-settings" style="display: none;">
+            <div class="form-group">
+              <label class="form-label">Credentials File</label>
+              <div class="input-group">
+                <input type="text" class="form-control" id="google-credentials" readonly>
+                <button class="btn btn-outline" id="browse-credentials">Browse</button>
+                <button class="btn btn-outline" id="test-google">Test Connection</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Plan and Billing -->
+      <div class="tab-content" id="plan-tab" style="display: none;">
+        <div class="card">
+          <h2 class="card-title">Plan and Billing</h2>
+          <p>Coming soon...</p>
+        </div>
+      </div>
+
+      <!-- Account -->
+      <div class="tab-content" id="account-tab" style="display: none;">
+        <div class="card">
+          <h2 class="card-title">Account</h2>
+          <p>Coming soon...</p>
+        </div>
+      </div>
+    </main>
+  </div>
+
+  <script src="./renderer.js"></script>
+</body>
+</html> 
