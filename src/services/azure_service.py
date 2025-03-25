@@ -31,8 +31,28 @@ class AzureService:
     def __init__(self, config_manager):
         """Initialize the Azure service"""
         self.config_manager = config_manager
+        
+        # Carregar chave da API e região
         self.api_key = self.config_manager.get_value("recognition", "azure_api_key", "")
+        if not self.api_key:
+            # Log para diagnóstico
+            logger.warning("API key não encontrada em 'azure_api_key', tentando campo alternativo 'azure_key'")
+            self.api_key = self.config_manager.get_value("recognition", "azure_key", "")
+        
         self.region = self.config_manager.get_value("recognition", "azure_region", "")
+        
+        # Log detalhado para diagnóstico
+        if self.api_key:
+            masked_key = self.api_key[:5] + "..." + self.api_key[-5:] if len(self.api_key) > 10 else "***"
+            logger.info(f"Azure API key carregada: {masked_key}")
+        else:
+            logger.error("Não foi possível encontrar uma chave Azure API válida na configuração")
+        
+        if self.region:
+            logger.info(f"Azure region configurada: {self.region}")
+        else:
+            logger.error("Region Azure não encontrada na configuração")
+        
         self.speech_config = None
         self.custom_temp_dir = None
         self.max_retries = 3
@@ -121,46 +141,30 @@ class AzureService:
             logger.error(f"Error getting supported languages: {str(e)}")
             return []
     
-    def update_credentials(self, api_key=None, region=None):
-        """Update the Azure Speech Services credentials"""
-        # Se os parâmetros não forem fornecidos, obter do config_manager
-        if api_key is None:
-            api_key = self.config_manager.get_value("recognition", "azure_api_key", "")
-        if region is None:
-            region = self.config_manager.get_value("recognition", "azure_region", "")
+    def update_credentials(self, api_key, region):
+        """
+        Atualizar credenciais do serviço Azure Speech
+        
+        Args:
+            api_key (str): Chave de API do Azure Speech
+            region (str): Região do Azure Speech
             
-        old_key = self.api_key
-        old_region = self.region
-        
-        self.api_key = api_key
-        self.region = region
-        
-        # Salvar no config_manager
-        self.config_manager.set_value("recognition", "azure_api_key", api_key)
-        self.config_manager.set_value("recognition", "azure_region", region)
-        self.config_manager.save_config()
-        
-        # Registrar informações detalhadas para diagnóstico
-        if not self.api_key:
-            logger.error("Azure API key is empty or not configured")
-        else:
-            # Mostrar apenas parte da chave por segurança
+        Returns:
+            bool: True se as credenciais foram atualizadas com sucesso, False caso contrário
+        """
+        try:
+            # Atualizar credenciais
+            self.api_key = api_key
+            self.region = region
+            
+            # Log detalhado
             masked_key = self.api_key[:5] + "..." + self.api_key[-5:] if len(self.api_key) > 10 else "***"
-            logger.info(f"Azure API key configured: {masked_key}")
-        
-        if not self.region:
-            logger.error("Azure region is empty or not configured")
-        else:
-            logger.info(f"Azure region configured: {self.region}")
-        
-        # Verificar se as credenciais são válidas
-        if self.api_key and self.region:
-            logger.info("Azure credentials are valid, initializing speech config")
-            self._initialize_speech_config()
-            return True
-        else:
-            logger.warning("Azure credentials are invalid or incomplete")
-            self.speech_config = None
+            logger.info(f"Atualizando credenciais do Azure Speech: Key={masked_key}, Region={region}")
+            
+            # Reinicializar configuração de fala
+            return self._initialize_speech_config()
+        except Exception as e:
+            logger.error(f"Erro ao atualizar credenciais do Azure Speech: {str(e)}")
             return False
     
     def _initialize_speech_config(self):
@@ -171,6 +175,10 @@ class AzureService:
                 logger.error("Cannot initialize Azure Speech Services: API key or region not configured")
                 self.speech_config = None
                 return False
+            
+            # Log detalhado para diagnóstico
+            masked_key = self.api_key[:5] + "..." + self.api_key[-5:] if len(self.api_key) > 10 else "***"
+            logger.info(f"Inicializando Azure Speech com: API Key={masked_key}, Region={self.region}")
             
             # Verificar versão do SDK e atualizar se necessário
             self._check_sdk_version()

@@ -34,6 +34,9 @@ class LanguageRulesManager:
         
         # Verificar e registrar as configurações de idioma no início
         self.verify_language_settings()
+        
+        # Garantir que key_targets esteja configurado para todas as teclas de idioma
+        self.ensure_key_targets()
     
     def verify_language_settings(self):
         """
@@ -61,11 +64,17 @@ class LanguageRulesManager:
             language_hotkeys = self.config_manager.get_value("hotkeys", "language_hotkeys", [])
             if language_hotkeys:
                 logger.warning(f"[STARTUP] Found {len(language_hotkeys)} language hotkeys configured")
+                
+                # Garantir que key_targets esteja configurado
+                key_targets = self.config_manager.get_value("language_rules", "key_targets", {})
+                
                 for i, hotkey in enumerate(language_hotkeys):
                     if isinstance(hotkey, dict) and "key" in hotkey:
                         key = hotkey.get("key", "")
                         language = hotkey.get("language", "")
-                        logger.warning(f"[STARTUP] Language hotkey {i+1}: key={key}, language={language}")
+                        # Verificar se há um target_language configurado para essa tecla
+                        target_lang = key_targets.get(key, language)
+                        logger.warning(f"[STARTUP] Language hotkey {i+1}: key={key}, source={language}, target={target_lang}")
             
             # Verificar o idioma de destino para hands-free
             target_language = self.get_target_language_for_hands_free()
@@ -228,79 +237,154 @@ class LanguageRulesManager:
         logger.warning(f"Using fallback target language from config: {target_language}")
         return target_language
     
-    def apply_language_settings(self, dictation_manager, hotkey_type, language_hotkey=None):
+    def get_source_language_for_push_to_talk(self):
         """
-        Aplica as configurações de idioma ao DictationManager com base no tipo de hotkey
+        Obtém o idioma de origem para o modo push-to-talk
+        
+        Returns:
+            str: O idioma de origem para o modo push-to-talk
+        """
+        try:
+            # Obter a configuração da tecla push-to-talk
+            push_to_talk = self.config_manager.get_value("hotkeys", "push_to_talk", {})
+            if not isinstance(push_to_talk, dict) or "key" not in push_to_talk:
+                logger.warning("Invalid push-to-talk configuration")
+                return self.config_manager.get_value("recognition", "language", "en-US")
+            
+            # Obter a tecla configurada para push-to-talk
+            key = push_to_talk.get("key", "")
+            logger.info(f"Push-to-talk key: {key}")
+            
+            # Verificar se existe uma configuração específica para esta tecla em language_rules.key_languages
+            key_languages = self.config_manager.get_value("language_rules", "key_languages", {})
+            if isinstance(key_languages, dict) and key in key_languages:
+                language = key_languages.get(key)
+                logger.info(f"Using language from key_languages for push-to-talk key '{key}': {language}")
+                return language
+            
+            # Se não houver uma configuração específica, usar o idioma de reconhecimento configurado na aba Languages
+            recognition_language = self.config_manager.get_value("recognition", "language", "en-US")
+            logger.info(f"Push-to-talk source language from config: {recognition_language}")
+            return recognition_language
+        except Exception as e:
+            logger.error(f"Error getting source language for push-to-talk: {str(e)}")
+            logger.error(traceback.format_exc())
+            # Retornar valor padrão em caso de erro
+            return self.config_manager.get_value("recognition", "language", "en-US")
+    
+    def apply_language_settings(self, dictation_manager, context, hotkey_config=None):
+        """
+        Aplica as configurações de idioma com base no contexto
         
         Args:
             dictation_manager: O gerenciador de ditado
-            hotkey_type (str): O tipo de hotkey ("push_to_talk", "hands_free", "language_hotkey")
-            language_hotkey (dict, optional): A configuração da language hotkey, se hotkey_type for "language_hotkey"
-            
-        Returns:
-            bool: True se as configurações foram aplicadas com sucesso, False caso contrário
+            context: O contexto para aplicar as configurações (push_to_talk, language_hotkey, etc.)
+            hotkey_config: Configuração da hotkey para contextos que exigem isso
         """
         try:
-            # Definir o idioma de reconhecimento (sempre o mesmo)
-            recognition_language = self.get_recognition_language()
-            logger.warning(f"Setting recognition language to: {recognition_language}")
-            dictation_manager.set_language(recognition_language)
+            # Obter o modo de regras de idioma: simple ou advanced
+            mode = self.config_manager.get_value("language_rules", "mode", "simple")
+            logger.info(f"Applying language rules in {mode} mode for context: {context}")
             
-            # Verificar se o idioma de reconhecimento foi aplicado corretamente
-            current_recognition = dictation_manager.get_language()
-            if current_recognition != recognition_language:
-                logger.error(f"Failed to set recognition language. Expected: {recognition_language}, Got: {current_recognition}")
-            
-            # Definir o idioma de destino com base no tipo de hotkey
-            target_language = None
-            
-            if hotkey_type == "push_to_talk":
-                target_language = self.get_target_language_for_push_to_talk()
-                logger.warning(f"[PUSH-TO-TALK] Using push-to-talk target language: {target_language}")
+            # Modo simples: aplicar regras baseadas em contexto
+            if mode == "simple":
+                # Contexto padrão: usar idioma de reconhecimento padrão
+                if context == "default":
+                    # Para o modo padrão, usar a língua de reconhecimento e traduzir se auto_translate estiver ativado
+                    recognition_language = self.config_manager.get_value("recognition", "language", "en-US")
+                    target_language = self.config_manager.get_value("translation", "target_language", "pt-BR")
+                    auto_translate = self.config_manager.get_value("translation", "auto_translate", True)
+                    
+                    logger.info(f"Applying default settings: {recognition_language} -> {target_language} (auto_translate: {auto_translate})")
+                    self._apply_settings(dictation_manager, recognition_language, target_language, auto_translate)
                 
-                # Log adicional para push-to-talk
-                push_to_talk = self.config_manager.get_value("hotkeys", "push_to_talk", {})
-                key = push_to_talk.get("key", "")
-                logger.warning(f"[PUSH-TO-TALK] Key: {key}, Target Language: {target_language}")
-            elif hotkey_type == "hands_free":
-                target_language = self.get_target_language_for_hands_free()
-                logger.warning(f"Using hands-free target language: {target_language}")
-            elif hotkey_type == "language_hotkey" and language_hotkey:
-                target_language = self.get_target_language_for_language_hotkey(language_hotkey)
-                logger.warning(f"Using language hotkey target language: {target_language}")
-            else:
-                logger.error(f"Unknown hotkey type: {hotkey_type}")
-                return False
-            
-            # Verificar se temos um idioma de destino válido
-            if not target_language:
-                logger.error(f"Failed to get target language for hotkey type: {hotkey_type}")
-                return False
+                # Contexto push-to-talk (Caps Lock): usar configuração específica para PTT
+                elif context == "push_to_talk":
+                    # Para push-to-talk, usar sempre o idioma configurado na aba de reconhecimento (recognition)
+                    # e traduzir para o idioma configurado na aba de tradução (translation)
+                    recognition_language = self.config_manager.get_value("recognition", "language", "en-US")
+                    target_language = self.config_manager.get_value("translation", "target_language", "pt-BR")
+                    auto_translate = self.config_manager.get_value("translation", "auto_translate", True)
+                    
+                    logger.info(f"Applying push-to-talk settings: {recognition_language} -> {target_language} (auto_translate: {auto_translate})")
+                    self._apply_settings(dictation_manager, recognition_language, target_language, auto_translate)
                 
-            # Log dos idiomas configurados para diagnóstico
-            logger.warning(f"CONFIGURAÇÃO FINAL - Reconhecimento: {recognition_language}, Destino: {target_language}")
+                # Contexto language_hotkey: usar o idioma configurado para a tecla específica
+                elif context == "language_hotkey" and hotkey_config:
+                    # Obter o idioma configurado para esta hotkey
+                    recognition_language = hotkey_config.get("language")
+                    if not recognition_language:
+                        logger.warning("No language specified in language hotkey config, using default recognition language")
+                        recognition_language = self.config_manager.get_value("recognition", "language", "en-US")
+                    else:
+                        logger.info(f"Language hotkey recognition language: {recognition_language}")
+                    
+                    # Verificar se a configuração tem um idioma de destino explícito
+                    if "target_language" in hotkey_config:
+                        target_language = hotkey_config.get("target_language")
+                        logger.info(f"Using explicit target language from hotkey config: {target_language}")
+                    else:
+                        # Se não tiver, usar o idioma de destino padrão
+                        target_language = self.config_manager.get_value("translation", "target_language", "pt-BR")
+                        logger.info(f"Using default target language: {target_language}")
+                    
+                    # Decidir sobre a tradução automática (não traduzir se os idiomas forem iguais)
+                    if recognition_language == target_language:
+                        auto_translate = False
+                        logger.info(f"Recognition and target languages are the same ({recognition_language}), no translation needed")
+                    else:
+                        auto_translate = True
+                        logger.info(f"Different languages, translation needed: {recognition_language} -> {target_language}")
+                    
+                    logger.info(f"Applying language hotkey settings: {recognition_language} -> {target_language} (auto_translate: {auto_translate})")
+                    self._apply_settings(dictation_manager, recognition_language, target_language, auto_translate)
+                
+                # Contexto hands-free: usar configuração específica para hands-free
+                elif context == "hands_free":
+                    # Para o modo hands-free, usar a configuração default
+                    recognition_language = self.config_manager.get_value("recognition", "language", "en-US")
+                    target_language = self.config_manager.get_value("translation", "target_language", "pt-BR")
+                    auto_translate = self.config_manager.get_value("translation", "auto_translate", True)
+                    
+                    logger.info(f"Applying hands-free settings: {recognition_language} -> {target_language} (auto_translate: {auto_translate})")
+                    self._apply_settings(dictation_manager, recognition_language, target_language, auto_translate)
+                
+                # Contexto desconhecido: usar configuração padrão
+                else:
+                    logger.warning(f"Unknown context: {context}, using default settings")
+                    recognition_language = self.config_manager.get_value("recognition", "language", "en-US")
+                    target_language = self.config_manager.get_value("translation", "target_language", "pt-BR")
+                    auto_translate = self.config_manager.get_value("translation", "auto_translate", True)
+                    
+                    logger.info(f"Applying fallback settings for unknown context: {recognition_language} -> {target_language} (auto_translate: {auto_translate})")
+                    self._apply_settings(dictation_manager, recognition_language, target_language, auto_translate)
             
-            # Confirmar se os idiomas estão definidos corretamente
-            if recognition_language == target_language:
-                logger.warning("AVISO: Idioma de reconhecimento e destino são iguais. A tradução não será aplicada, apenas processamento.")
-                # Forçar o processamento mesmo quando os idiomas são iguais
-                if hasattr(dictation_manager, 'set_force_process'):
-                    dictation_manager.set_force_process(True)
-                    logger.warning("Forcing text processing even with same languages")
+            # Modo avançado: aplicar regras baseadas em perfis
+            elif mode == "advanced":
+                # Implementação futura para regras avançadas baseadas em perfis
+                logger.warning("Advanced language rules mode not implemented yet, falling back to simple mode")
+                self.apply_language_settings(dictation_manager, context, hotkey_config)  # Recursion with simple mode
+            
+            # Modo desconhecido: usar modo simples como fallback
             else:
-                # Desativar o processamento forçado quando os idiomas são diferentes
-                if hasattr(dictation_manager, 'set_force_process'):
-                    dictation_manager.set_force_process(False)
+                logger.warning(f"Unknown language rules mode: {mode}, falling back to simple mode")
+                self.apply_language_settings(dictation_manager, context, hotkey_config)  # Recursion with simple mode
             
-            # Definir o idioma de destino no DictationManager
-            logger.warning(f"Setting target language to: {target_language}")
-            dictation_manager.set_target_language(target_language)
-            
-            return True
         except Exception as e:
             logger.error(f"Error applying language settings: {str(e)}")
             logger.error(traceback.format_exc())
-            return False
+            
+            # Em caso de erro, tentar aplicar configurações básicas
+            try:
+                recognition_language = self.config_manager.get_value("recognition", "language", "en-US")
+                target_language = self.config_manager.get_value("translation", "target_language", "pt-BR")
+                auto_translate = self.config_manager.get_value("translation", "auto_translate", True)
+                
+                logger.info(f"Applying fallback settings after error: {recognition_language} -> {target_language}")
+                self._apply_settings(dictation_manager, recognition_language, target_language, auto_translate)
+            except Exception as fallback_error:
+                logger.error(f"Error applying fallback settings: {str(fallback_error)}")
+                logger.error(traceback.format_exc())
 
     def get_language_for_key(self, key):
         """
@@ -340,3 +424,152 @@ class LanguageRulesManager:
         target_language = self.config_manager.get_value("translation", "target_language")
         logger.warning(f"get_language_for_key: No specific configuration found for key '{key}', using default: {target_language}")
         return target_language
+
+    def _apply_settings(self, dictation_manager, recognition_language, target_language, auto_translate):
+        """Aplica configurações específicas de idioma ao dictation_manager
+        
+        Args:
+            dictation_manager: O gerenciador de ditado
+            recognition_language: O idioma de reconhecimento
+            target_language: O idioma de destino da tradução
+            auto_translate: Se a tradução automática deve ser ativada
+        """
+        try:
+            # Log detalhado para diagnóstico
+            logger.info(f"Applying language settings: {recognition_language} -> {target_language} (auto_translate: {auto_translate})")
+            
+            # Definir o idioma de reconhecimento
+            if hasattr(dictation_manager, 'set_language'):
+                dictation_manager.set_language(recognition_language)
+                logger.info(f"Recognition language set to: {recognition_language}")
+            else:
+                logger.warning("dictation_manager does not have set_language method")
+            
+            # Definir o idioma de destino
+            if hasattr(dictation_manager, 'set_target_language'):
+                dictation_manager.set_target_language(target_language)
+                logger.info(f"Target language set to: {target_language}")
+            else:
+                logger.warning("dictation_manager does not have set_target_language method")
+            
+            # Definir auto-tradução
+            if hasattr(dictation_manager, 'set_auto_translate'):
+                dictation_manager.set_auto_translate(auto_translate)
+                logger.info(f"Auto-translate set to: {auto_translate}")
+            else:
+                logger.warning("dictation_manager does not have set_auto_translate method")
+            
+            # Configuração adicional para tratamento de idiomas iguais
+            if recognition_language == target_language:
+                logger.info("Recognition and target languages are the same, translation will be skipped")
+                # Forçar processamento mesmo quando os idiomas são iguais (formatação, etc.)
+                if hasattr(dictation_manager, 'set_force_process'):
+                    dictation_manager.set_force_process(True)
+                    logger.info("Force processing enabled for same languages")
+            else:
+                # Desativar processamento forçado quando os idiomas são diferentes
+                if hasattr(dictation_manager, 'set_force_process'):
+                    dictation_manager.set_force_process(False)
+                    logger.info("Force processing disabled for different languages")
+                
+        except Exception as e:
+            logger.error(f"Error applying settings: {str(e)}")
+            import traceback
+            logger.error(traceback.format_exc())
+
+    def ensure_key_targets(self):
+        """
+        Garantir que cada tecla de idioma tenha uma configuração de idioma-alvo
+        no config.json em language_rules.key_targets
+        """
+        try:
+            logger.info("Ensuring key_targets configuration exists")
+            
+            # Obter configuração atual de key_targets
+            key_targets = self.config_manager.get_value("language_rules", "key_targets", {})
+            if not isinstance(key_targets, dict):
+                key_targets = {}
+            
+            # Obter as language_hotkeys configuradas
+            language_hotkeys = self.config_manager.get_value("hotkeys", "language_hotkeys", [])
+            if not isinstance(language_hotkeys, list):
+                language_hotkeys = []
+            
+            # Inicializar flag para verificar se houve alterações
+            changes_made = False
+            
+            # Registrar para debug
+            logger.info(f"Language hotkeys encontradas: {len(language_hotkeys)}")
+            for i, hotkey in enumerate(language_hotkeys):
+                if isinstance(hotkey, dict):
+                    key_name = hotkey.get("key", "")
+                    language = hotkey.get("language", "")
+                    logger.info(f"  Hotkey #{i}: key={key_name}, language={language}")
+            
+            # Para cada language_hotkey, garantir que haja uma entrada em key_targets
+            for hotkey in language_hotkeys:
+                if isinstance(hotkey, dict) and "key" in hotkey and "language" in hotkey:
+                    key = hotkey.get("key")
+                    language = hotkey.get("language")
+                    
+                    # Se a tecla não tiver uma configuração de idioma-alvo ou estiver diferente do configurado
+                    if key not in key_targets or key_targets[key] != language:
+                        # Configurar o idioma de destino para ser o mesmo configurado na hotkey
+                        key_targets[key] = language
+                        logger.info(f"Updated target language for hotkey '{key}' to '{language}'")
+                        changes_made = True
+            
+            # Se houver alterações, salvar a configuração
+            if changes_made:
+                self.config_manager.set_value("language_rules", "key_targets", key_targets)
+                self.config_manager.save_config()
+                logger.info("Saved updated key_targets configuration")
+                
+            # Log das configurações atuais
+            logger.info(f"Current key_targets configuration: {key_targets}")
+            return key_targets
+        
+        except Exception as e:
+            logger.error(f"Error ensuring key_targets: {str(e)}")
+            logger.error(traceback.format_exc())
+            return {}
+
+    def get_target_language_for_hotkey(self, pressed_key):
+        """
+        Retorna o idioma de destino configurado para uma tecla específica
+        
+        Args:
+            pressed_key: A tecla que foi pressionada
+            
+        Returns:
+            O idioma de destino para a tecla pressionada ou o mesmo idioma da tecla
+            se nenhum destino estiver configurado
+        """
+        try:
+            # Obter a configuração de targets para teclas
+            key_targets = self.config_manager.get_value("language_rules", "key_targets", {})
+            
+            # Obter o idioma de origem para a tecla pressionada
+            language_hotkeys = self.config_manager.get_value("hotkeys", "language_hotkeys", [])
+            source_language = None
+            
+            # Encontrar o idioma de origem da tecla pressionada
+            for hotkey in language_hotkeys:
+                if isinstance(hotkey, dict) and hotkey.get("key", "") == pressed_key:
+                    source_language = hotkey.get("language", "")
+                    break
+            
+            # Se não encontramos o idioma de origem, não podemos determinar o alvo
+            if not source_language:
+                logger.warning(f"No source language found for key: {pressed_key}")
+                return None
+            
+            # Verificar se há um target específico configurado para esta tecla
+            target_language = key_targets.get(pressed_key, source_language)
+            
+            logger.info(f"Target language for key '{pressed_key}' is '{target_language}' (source: '{source_language}')")
+            return target_language
+            
+        except Exception as e:
+            logger.error(f"Error getting target language for hotkey: {str(e)}")
+            return None

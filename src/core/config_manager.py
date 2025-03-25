@@ -48,7 +48,8 @@ class ConfigManager:
             "azure_translator_key": "",
             "azure_translator_region": "",
             "azure_openai_key": "",
-            "azure_openai_endpoint": ""
+            "azure_openai_endpoint": "",
+            "azure_openai_deployment": ""
         },
         "audio": {
             "default_microphone_id": 0,
@@ -146,7 +147,7 @@ class ConfigManager:
                 
                 # Check if API keys are present
                 if "recognition" in config:
-                    azure_key = config["recognition"].get("azure_key", "")
+                    azure_key = config["recognition"].get("azure_api_key", "")
                     azure_region = config["recognition"].get("azure_region", "")
                     whisper_key = config["recognition"].get("whisper_api_key", "")
                     logger.info(f"Loaded Azure key present: {bool(azure_key)}, Azure region: {azure_region}")
@@ -157,9 +158,36 @@ class ConfigManager:
                 if "translation" in config:
                     translator_key = config["translation"].get("azure_translator_key", "")
                     translator_region = config["translation"].get("azure_translator_region", "")
+                    azure_openai_key = config["translation"].get("azure_openai_key", "")
+                    azure_openai_endpoint = config["translation"].get("azure_openai_endpoint", "")
+                    azure_openai_deployment = config["translation"].get("azure_openai_deployment", "")
+                    
+                    # Log mais detalhado para depuração
                     logger.info(f"Loaded Translator key present: {bool(translator_key)}, Translator region: {translator_region}")
+                    logger.info(f"Loaded Azure OpenAI key present: {bool(azure_openai_key)}")
+                    logger.info(f"Loaded Azure OpenAI endpoint: {azure_openai_endpoint if azure_openai_endpoint else 'Not set'}")
+                    logger.info(f"Loaded Azure OpenAI deployment: {azure_openai_deployment if azure_openai_deployment else 'Not set'}")
+                    
+                    # Verificação adicional para Azure OpenAI
+                    if azure_openai_key and not azure_openai_endpoint:
+                        logger.warning("Azure OpenAI key present but endpoint is missing!")
+                    if azure_openai_key and not azure_openai_deployment:
+                        logger.warning("Azure OpenAI key present but deployment is missing!")
                 else:
                     logger.warning("Translation section missing from loaded config")
+                
+                # Garantir que os valores do Azure OpenAI estejam definidos, mesmo que vazios
+                if "translation" in config and not config["translation"].get("azure_openai_key"):
+                    config["translation"]["azure_openai_key"] = ""
+                    logger.info("Added missing azure_openai_key with empty default")
+                
+                if "translation" in config and not config["translation"].get("azure_openai_endpoint"):
+                    config["translation"]["azure_openai_endpoint"] = ""
+                    logger.info("Added missing azure_openai_endpoint with empty default")
+                
+                if "translation" in config and not config["translation"].get("azure_openai_deployment"):
+                    config["translation"]["azure_openai_deployment"] = ""
+                    logger.info("Added missing azure_openai_deployment with empty default")
                 
                 # Update with any missing default values
                 self._update_with_defaults(config)
@@ -397,6 +425,9 @@ class ConfigManager:
             temp_path = f"{self.config_path}.tmp"
             with open(temp_path, 'w', encoding='utf-8') as f:
                 json.dump(self.config, f, indent=4, ensure_ascii=False)
+                # Garantir que os dados sejam gravados no disco
+                f.flush()
+                os.fsync(f.fileno())
                 
             # Renomear o arquivo temporário para o destino final
             if os.path.exists(self.config_path):
@@ -407,6 +438,13 @@ class ConfigManager:
                     pass
                     
             os.rename(temp_path, self.config_path)
+            
+            # Criar backup automático após cada salvamento bem-sucedido
+            try:
+                backup_file = f"{self.config_path}.bak"
+                shutil.copy2(self.config_path, backup_file)
+            except Exception as backup_error:
+                logger.warning(f"Erro ao criar backup automático: {str(backup_error)}")
             
             # Atualizar o estado
             self.last_saved = time.time()
@@ -481,7 +519,8 @@ class ConfigManager:
             # Check Azure OpenAI
             azure_openai_key = self.get_value("translation", "azure_openai_key", "")
             azure_openai_endpoint = self.get_value("translation", "azure_openai_endpoint", "")
-            azure_openai_configured = bool(azure_openai_key and azure_openai_endpoint)
+            azure_openai_deployment = self.get_value("translation", "azure_openai_deployment", "")
+            azure_openai_configured = bool(azure_openai_key and azure_openai_endpoint and azure_openai_deployment)
             
             return {
                 "azure_speech": azure_configured,
@@ -498,4 +537,26 @@ class ConfigManager:
                 "google_speech": False,
                 "azure_translator": False,
                 "azure_openai": False
-            } 
+            }
+    
+    def ensure_saved(self):
+        """Garante que todas as configurações pendentes sejam salvas
+        
+        Este método deve ser chamado durante o encerramento do programa
+        para garantir que nenhuma configuração seja perdida.
+        """
+        with self.save_lock:
+            # Cancelar qualquer salvamento agendado
+            if self.scheduled_save:
+                try:
+                    self.scheduled_save.cancel()
+                    self.scheduled_save = None
+                except:
+                    pass
+            
+            # Forçar o salvamento se tiver alguma alteração pendente
+            if self.dirty:
+                logger.info("Salvando configurações pendentes antes do encerramento...")
+                self._perform_save()
+            else:
+                logger.info("Nenhuma configuração pendente para salvar.") 

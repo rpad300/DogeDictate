@@ -29,6 +29,9 @@ class StatsService:
             
         self.stats_file = os.path.join(self.config_dir, "stats.json")
         self.stats = self._load_stats()
+        
+        # Lista de callbacks para atualização
+        self.update_callbacks = []
     
     def _load_stats(self):
         """
@@ -109,7 +112,11 @@ class StatsService:
         self.stats["recordings_by_language"][language]["duration"] += duration
         self.stats["recordings_by_language"][language]["characters"] += text_length
         
+        # Salvar estatísticas
         self._save_stats()
+        
+        # Notificar callbacks
+        self._notify_update_callbacks()
     
     def get_stats(self):
         """
@@ -118,4 +125,122 @@ class StatsService:
         Returns:
             dict: Statistics data
         """
-        return self.stats 
+        return self.stats
+        
+    def get_stats_for_period(self, start_date, end_date):
+        """
+        Get statistics for a specific period
+        
+        Args:
+            start_date (str): Start date in format "yyyy-MM-dd"
+            end_date (str): End date in format "yyyy-MM-dd"
+            
+        Returns:
+            dict: Statistics for the period
+        """
+        try:
+            # Inicializar estatísticas do período
+            period_stats = {
+                "total_words": 0,
+                "total_time": 0,
+                "total_recordings": 0,
+                "total_characters": 0,
+                "avg_speed": 0
+            }
+            
+            # Se não houver dados por data, retornar estatísticas vazias
+            if "recordings_by_date" not in self.stats:
+                return period_stats
+                
+            # Filtrar datas no intervalo
+            for date, data in self.stats["recordings_by_date"].items():
+                # Verificar se a data está no intervalo
+                if start_date <= date <= end_date:
+                    # Adicionar estatísticas
+                    period_stats["total_recordings"] += data.get("count", 0)
+                    period_stats["total_time"] += data.get("duration", 0)
+                    period_stats["total_characters"] += data.get("characters", 0)
+                    
+                    # Calcular palavras aproximadas (6 caracteres por palavra em média)
+                    period_stats["total_words"] += int(data.get("characters", 0) / 6)
+            
+            # Calcular velocidade média (palavras por minuto)
+            if period_stats["total_time"] > 0:
+                period_stats["avg_speed"] = (period_stats["total_words"] * 60) / period_stats["total_time"]
+            
+            return period_stats
+            
+        except Exception as e:
+            import logging
+            import traceback
+            logger = logging.getLogger("DogeDictate.StatsService")
+            logger.error(f"Error getting stats for period: {str(e)}")
+            logger.error(traceback.format_exc())
+            
+            # Retornar estatísticas vazias em caso de erro
+            return {
+                "total_words": 0,
+                "total_time": 0,
+                "total_recordings": 0,
+                "total_characters": 0,
+                "avg_speed": 0
+            }
+    
+    def reset_statistics(self):
+        """
+        Reset all statistics
+        """
+        self.stats = {
+            "total_recordings": 0,
+            "total_duration": 0,
+            "total_characters": 0,
+            "recordings_by_date": {},
+            "recordings_by_language": {},
+            "last_updated": datetime.now().isoformat()
+        }
+        self._save_stats()
+        
+        # Notificar callbacks
+        self._notify_update_callbacks()
+        
+    def register_update_callback(self, callback):
+        """
+        Register a callback to be called when stats are updated
+        
+        Args:
+            callback: The callback function
+        """
+        if callback not in self.update_callbacks:
+            self.update_callbacks.append(callback)
+            
+    def _notify_update_callbacks(self):
+        """
+        Notify all registered callbacks
+        """
+        for callback in self.update_callbacks:
+            try:
+                callback()
+            except Exception as e:
+                import logging
+                import traceback
+                logger = logging.getLogger("DogeDictate.StatsService")
+                logger.error(f"Error calling update callback: {str(e)}")
+                logger.error(traceback.format_exc())
+                
+    def debug_stats(self):
+        """
+        Get a debug summary of the stats
+        
+        Returns:
+            str: A debug summary
+        """
+        try:
+            total_recordings = self.stats.get("total_recordings", 0)
+            total_duration = self.stats.get("total_duration", 0)
+            total_characters = self.stats.get("total_characters", 0)
+            num_dates = len(self.stats.get("recordings_by_date", {}))
+            num_languages = len(self.stats.get("recordings_by_language", {}))
+            
+            return f"Recordings: {total_recordings}, Duration: {total_duration:.1f}s, Chars: {total_characters}, Dates: {num_dates}, Languages: {num_languages}"
+        except Exception:
+            return "Error getting debug stats" 

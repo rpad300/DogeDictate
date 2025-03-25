@@ -435,4 +435,14 @@ class APIsTab(BaseTab):
             "translation", 
             "azure_openai_prompt", 
             self.openai_prompt_edit.toPlainText()
-        ) 
+        )
+        
+        # Força salvamento imediato para garantir que as configurações sejam persistidas
+        self.config_manager.save_config(force=True)
+        
+        # Log para depuração
+        logger = logging.getLogger("DogeDictate.APIsTab")
+        logger.info("Configurações de API salvas com sucesso")
+        logger.info(f"Azure OpenAI Key configurada: {bool(self.openai_key_edit.text())}")
+        logger.info(f"Azure OpenAI Endpoint: {self.openai_endpoint_edit.text()}")
+        logger.info(f"Azure OpenAI Deployment: {self.openai_deployment_edit.text()}") 

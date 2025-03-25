@@ -534,6 +534,11 @@ class MainWindow(QMainWindow):
             # Save settings
             try:
                 self._save_settings()
+                
+                # Garantir explicitamente que as configurações são salvas
+                if hasattr(self.config_manager, 'ensure_saved'):
+                    logger.info("Garantindo explicitamente que as configurações foram salvas")
+                    self.config_manager.ensure_saved()
             except Exception as e:
                 logger.error(f"Error saving settings on quit: {str(e)}")
             

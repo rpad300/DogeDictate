@@ -148,16 +148,35 @@ class HotkeyDialog(QDialog):
             self.config_manager.set_value("hotkeys", "language_hotkeys", [])
             
             # Save language hotkeys
+            language_hotkeys = []
             for i, entry in enumerate(self.lang_hotkey_entries):
                 key, modifiers, language = entry.get_hotkey()
                 if key and language:
+                    # Adicionar hotkey à lista local primeiro
+                    language_hotkeys.append({
+                        "key": key,
+                        "modifiers": modifiers,
+                        "language": language
+                    })
+                    # Atualizar no hotkey_manager
                     self.hotkey_manager.update_language_hotkey(i, key, modifiers, language)
             
-            # Salvar configurações
-            self.config_manager.save_config()
+            # Garantir que os hotkeys estejam definidos diretamente no ConfigManager
+            self.config_manager.set_value("hotkeys", "language_hotkeys", language_hotkeys)
+            
+            # Salvar configurações com força para garantir persistência
+            self.config_manager.save_config(force=True)
+            logger.info("Configurações salvas com força no arquivo de configuração")
             
             # Recarregar configurações no hotkey_manager
             self.hotkey_manager.reload_config()
+            
+            # Atualizar target languages nas regras de linguagem
+            if hasattr(self.hotkey_manager, 'language_rules') and self.hotkey_manager.language_rules:
+                self.hotkey_manager.language_rules.ensure_key_targets()
+                logger.info("Language targets updated based on language hotkeys")
+            else:
+                logger.warning("Could not update language targets: language_rules not available")
             
             # Log para depuração
             logger.info("Hotkeys saved successfully")
@@ -362,7 +381,41 @@ class HotkeyEdit(QWidget):
             self.stop_recording()
             return
         
-        # Skip if only modifier keys are pressed
+        # Verificar se uma tecla modificadora foi pressionada sozinha
+        # Para isso, verificamos se apenas um tipo de modificador está presente no evento
+        # e se a key_code corresponde a essa tecla modificadora
+        is_only_modifier = False
+        if key_code == Qt.Key_Control:
+            if modifiers == Qt.ControlModifier:
+                self.key = "ctrl"
+                self.modifiers = []
+                is_only_modifier = True
+                logger.info("Ctrl key captured as standalone key")
+        elif key_code == Qt.Key_Shift:
+            if modifiers == Qt.ShiftModifier:
+                self.key = "shift"
+                self.modifiers = []
+                is_only_modifier = True
+                logger.info("Shift key captured as standalone key")
+        elif key_code == Qt.Key_Alt:
+            if modifiers == Qt.AltModifier:
+                self.key = "alt"
+                self.modifiers = []
+                is_only_modifier = True
+                logger.info("Alt key captured as standalone key")
+        elif key_code == Qt.Key_Meta:
+            if modifiers == Qt.MetaModifier:
+                self.key = "cmd"
+                self.modifiers = []
+                is_only_modifier = True
+                logger.info("Meta/Win key captured as standalone key")
+                
+        # Se uma tecla modificadora foi capturada sozinha, finalizar a gravação
+        if is_only_modifier:
+            self._finish_recording()
+            return
+            
+        # Skip if only modifier keys are pressed and we're waiting for a combination
         if key_code in (Qt.Key_Control, Qt.Key_Shift, Qt.Key_Alt, Qt.Key_Meta):
             return
         
@@ -499,6 +552,15 @@ class HotkeyEdit(QWidget):
         # Format key
         if self.key.startswith("mouse_"):
             key_text = self.key.replace("mouse_", "Mouse ").title()
+        elif self.key in ["ctrl", "shift", "alt", "cmd"]:
+            # Exibir teclas modificadoras de forma mais amigável
+            key_map = {
+                "ctrl": "Ctrl",
+                "shift": "Shift",
+                "alt": "Alt",
+                "cmd": "Win"
+            }
+            key_text = key_map.get(self.key, self.key.upper())
         else:
             key_text = self.key.upper()
         

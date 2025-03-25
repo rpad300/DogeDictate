@@ -20,7 +20,17 @@ class WhisperService:
     def __init__(self, config_manager):
         """Initialize the Whisper service"""
         self.config_manager = config_manager
+        
+        # Tentar carregar a chave da API
         self.api_key = self.config_manager.get_value("recognition", "whisper_api_key", "")
+        
+        # Log detalhado para diagnóstico
+        if self.api_key:
+            masked_key = self.api_key[:5] + "..." + self.api_key[-5:] if len(self.api_key) > 10 else "***"
+            logger.info(f"Whisper API key carregada: {masked_key}")
+        else:
+            logger.warning("Não foi configurada uma chave Whisper API válida na configuração")
+            
         self.client = None
         
         # Initialize client if API key is available
@@ -51,6 +61,9 @@ class WhisperService:
             logger.error("Whisper API key not configured")
             return ""
             
+        # Log detalhado para diagnóstico
+        logger.info(f"Iniciando reconhecimento com Whisper, idioma: {language}")
+        
         try:
             import io
             import tempfile

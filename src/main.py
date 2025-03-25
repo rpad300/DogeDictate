@@ -282,6 +282,9 @@ def main():
         app = QApplication(sys.argv)
         app.setApplicationName("DogeDictate")
         
+        # Garantir que as configurações são salvas antes de sair
+        app.aboutToQuit.connect(lambda: ensure_config_saved(config_manager))
+        
         # Try to load splash screen
         logger.info("Creating splash screen...")
         splash_pixmap = None
@@ -402,7 +405,16 @@ def main():
         sys.exit(app.exec_())
     except Exception as e:
         logger.critical(f"Application failed to start: {str(e)}")
-        sys.exit(1) 
+        sys.exit(1)
+
+def ensure_config_saved(config_manager):
+    """Ensure all configurations are saved before application quits"""
+    try:
+        if hasattr(config_manager, 'ensure_saved'):
+            logger.info("Garantindo que todas as configurações estão salvas antes de sair...")
+            config_manager.ensure_saved()
+    except Exception as e:
+        logger.error(f"Erro ao salvar configurações durante encerramento: {str(e)}")
 
 if __name__ == "__main__":
     # Configurar logging

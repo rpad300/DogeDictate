@@ -61,15 +61,10 @@ class SettingsDialog(QDialog):
         
         # Create button box
         button_box = QDialogButtonBox(
-            QDialogButtonBox.Save | QDialogButtonBox.Ok | QDialogButtonBox.Cancel
+            QDialogButtonBox.Ok | QDialogButtonBox.Cancel
         )
         button_box.accepted.connect(self.accept)
         button_box.rejected.connect(self.reject)
-        
-        # Conectar o botão Salvar
-        save_button = button_box.button(QDialogButtonBox.Save)
-        save_button.setText(_("save", "Save"))
-        save_button.clicked.connect(self.save_without_closing)
         
         # Traduzir os botões padrão
         ok_button = button_box.button(QDialogButtonBox.Ok)
@@ -117,10 +112,6 @@ class SettingsDialog(QDialog):
         # Atualizar botões
         button_box = self.findChild(QDialogButtonBox)
         if button_box:
-            save_button = button_box.button(QDialogButtonBox.Save)
-            if save_button:
-                save_button.setText(_("save", "Save"))
-            
             ok_button = button_box.button(QDialogButtonBox.Ok)
             if ok_button:
                 ok_button.setText(_("ok", "OK"))
@@ -144,8 +135,8 @@ class SettingsDialog(QDialog):
             self.plan_tab.save_settings()
             self.account_tab.save_settings()
             
-            # Salvar configurações no disco
-            self.config_manager.save_config()
+            # Salvar configurações no disco com force=True para garantir que seja salvo imediatamente
+            self.config_manager.save_config(force=True)
             
             logger.info("Settings saved")
             

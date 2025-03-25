@@ -49,13 +49,68 @@ class DictationManager:
     _last_mic_test_time = 0
     
     def __init__(self, config_manager):
-        """Initialize the dictation manager
+        """Initialize dictation manager
         
         Args:
-            config_manager: The configuration manager
+            config_manager (ConfigManager): Configuration manager
         """
-        # Store the config manager
-        self.config_manager = config_manager
+        try:
+            self.config_manager = config_manager
+            
+            # Get configuration values
+            self.language = self.config_manager.get_value("recognition", "language", "en-US")
+            self.target_language = self.config_manager.get_value("translation", "target_language", "pt-BR")
+            self.auto_translate = self.config_manager.get_value("translation", "auto_translate", True)
+            self.service_name = self.config_manager.get_value("recognition", "service", "azure")
+            self.translation_service_name = self.config_manager.get_value("translation", "service", "azure_openai")
+            
+            # Inicializar atributos de classe
+            self.is_dictating = False
+            self.is_processing = False
+            self.push_to_talk_active = False
+            self.recognition_text = ""
+            self.translation_text = ""
+            self.text_formatter = None
+            
+            # Inicialização proativa de serviços de tradução para garantir disponibilidade
+            self.logger.info("Inicializando proativamente serviços de tradução")
+            self._initialize_translation_services()
+            
+            # Verificar se o serviço de tradução foi inicializado corretamente
+            if not hasattr(self, 'translator_service') or self.translator_service is None:
+                self.logger.warning("translator_service não inicializado no construtor, tentando novamente")
+                self.translator_service = self._get_translator_service(self.translation_service_name)
+                
+            if self.translator_service is None:
+                self.logger.error("Não foi possível inicializar translator_service no construtor")
+            else:
+                self.logger.info(f"translator_service inicializado com sucesso: {type(self.translator_service).__name__}")
+        except Exception as e:
+            self.logger.error(f"Erro durante a inicialização do DictationManager: {str(e)}")
+            import traceback
+            self.logger.error(traceback.format_exc())
+            
+        # Inicialização padrão (para garantir que atributos básicos sempre existam)
+        # Defaults
+        self.stream = None
+        self.recognizers = {}
+        
+        # Configurações padrão
+        self.current_language = "pt-PT"
+        self.service = None
+        self.recognition_service = "azure"
+        if not hasattr(self, 'translation_service_name'):
+            self.translation_service_name = "azure_openai"  # Definir valor padrão
+        if not hasattr(self, 'translator_service'):
+            self.translator_service = None
+        self.azure_service = None
+        self.whisper_service = None
+        self.google_service = None
+        self.local_whisper_service = None
+        self.azure_translator_service = None
+        self.azure_openai_service = None
+        self.m2m100_translator_service = None
+        self.local_llm_translator_service = None
         
         # Inicializar o lock para variáveis compartilhadas
         self.lock = threading.RLock()
@@ -113,8 +168,17 @@ class DictationManager:
         self.current_language = self.language  # Definir current_language igual a language por padrão
         self.target_language = self.config_manager.get_value("translation", "target_language", "en-US")
         
-        # Initialize microphone
+        # Initialize microphone using the main key or alternative
         self.default_mic_id = self.config_manager.get_value("audio", "microphone_id", 0)
+        if not self.default_mic_id:
+            self.default_mic_id = self.config_manager.get_value("audio", "default_microphone_id", 0)
+            
+        # Normalize configurations: ensure all microphone keys are consistent
+        self.config_manager.set_value("audio", "microphone_id", self.default_mic_id)
+        self.config_manager.set_value("audio", "default_microphone_id", self.default_mic_id)
+        
+        # Save normalized configurations
+        self.config_manager.save_config()
         
         # List all audio devices and log their details
         self.logger.info("Scanning audio devices...")
@@ -131,7 +195,12 @@ class DictationManager:
         # If HyperX device is found, set it as default
         if hyperx_device:
             self.default_mic_id = hyperx_device['id']
+            # Normalize configurations: ensure the keys used for the microphone are consistent
             self.config_manager.set_value("audio", "microphone_id", self.default_mic_id)
+            self.config_manager.set_value("audio", "default_microphone_id", self.default_mic_id)
+            self.config_manager.set_value("audio", "default_microphone", hyperx_device['name'])
+            # Save configuration
+            self.config_manager.save_config()
             self.logger.info(f"Set HyperX device as default microphone (ID: {self.default_mic_id})")
         
         # Initialize temp directory
@@ -145,10 +214,10 @@ class DictationManager:
         # Initialize services through the dedicated method
         self._initialize_services(self.config_manager.get_value("recognition", "service", "azure"))
         
-        # Initialize VAD parameters - Ajustados para maior sensibilidade
-        self.vad_enabled = False  # Desabilitar VAD por padrão
-        self.vad_threshold = 0.001  # Reduzir threshold para detectar sons mais baixos
-        self.vad_silence_duration = 0.5  # Reduzir duração do silêncio
+        # Initialize VAD parameters - Adjusted for higher sensitivity
+        self.vad_enabled = False  # Disable VAD by default
+        self.vad_threshold = 0.001  # Reduced threshold to detect lower sounds
+        self.vad_silence_duration = 0.5  # Reduced duration of silence
         
         # Save VAD settings to config
         self.config_manager.set_value("vad", "enabled", self.vad_enabled)
@@ -185,66 +254,84 @@ class DictationManager:
     def _initialize_services(self, service_name):
         """Initialize recognition and translation services"""
         try:
-            # Initialize default service attributes to None
-            self.whisper_service = None
-            self.azure_service = None
-            self.google_service = None
-            self.local_whisper_service = None
+            # Logging inicial
+            self.logger.info("Inicializando serviços de reconhecimento e tradução")
+            self.logger.info(f"Serviço solicitado: {service_name}")
             
-            # Initialize translation service attributes to None
-            self.azure_translator_service = None
-            self.azure_openai_service = None
-            self.m2m100_translator_service = None
-            self.local_llm_translator_service = None
-            
-            # Set default attributes for services
-            self.service = None
-            self.translator_service = None
-            self.translation_service = None  # Alias for compatibility
-            
-            # Initialize recognition service name
-            self.recognition_service = service_name
-            self.service_name = service_name  # Para compatibilidade com código existente
-            
-            self.logger.info("Initializing speech recognition services...")
-            self.logger.info(f"Requested service: {service_name}")
-            
-            # Initialize whisper service
-            if 'whisper' in service_name:
-                self.logger.info("Initializing Whisper service...")
-                self.whisper_service = WhisperService(self.config_manager)
-                self.logger.info("Whisper service initialized")
+            # Lista para verificar serviços disponíveis
+            available_services = {}
             
             # Initialize Azure service
             if hasattr(self.config_manager, 'get_value'):
+                # Verificar ambos os possíveis nomes de chave
                 azure_key = self.config_manager.get_value("recognition", "azure_api_key", "")
+                if not azure_key:
+                    self.logger.info("Chave 'azure_api_key' não encontrada, tentando 'azure_key'")
+                    azure_key = self.config_manager.get_value("recognition", "azure_key", "")
+                    
                 azure_region = self.config_manager.get_value("recognition", "azure_region", "westeurope")
                 
                 if azure_key:
-                    self.logger.info("Initializing Azure service...")
+                    self.logger.info("Inicializando serviço Azure...")
                     self.azure_service = AzureService(self.config_manager)
-                    # Show only part of the key for security
-                    masked_key = azure_key[:5] + "..." + azure_key[-5:] if len(azure_key) > 10 else "***"
-                    self.logger.info(f"Azure API key configured: {masked_key}")
-                    self.logger.info(f"Azure region configured: {azure_region}")
-                    self.logger.info("Azure service initialized")
+                    
+                    # Verificar se o serviço foi inicializado com sucesso
+                    if hasattr(self.azure_service, 'update_credentials'):
+                        success = self.azure_service.update_credentials(azure_key, azure_region)
+                        if success:
+                            self.logger.info("Serviço Azure inicializado com sucesso")
+                            available_services['azure'] = self.azure_service
+                        else:
+                            self.logger.warning("Falha ao inicializar serviço Azure")
+                    else:
+                        # Show only part of the key for security
+                        masked_key = azure_key[:5] + "..." + azure_key[-5:] if len(azure_key) > 10 else "***"
+                        self.logger.info(f"Azure API key configurada: {masked_key}")
+                        self.logger.info(f"Azure region configurada: {azure_region}")
+                        self.logger.info("Serviço Azure inicializado")
+                        available_services['azure'] = self.azure_service
                 else:
-                    self.logger.warning("Azure API key not configured")
+                    self.logger.warning("Azure API key não configurada")
             
             # Initialize Google service
             google_credentials = self.config_manager.get_value("recognition", "google_credentials_path", "")
-            if google_credentials and os.path.exists(google_credentials):
-                self.logger.info("Initializing Google service...")
+            if google_credentials:
+                self.logger.info("Inicializando serviço Google...")
                 self.google_service = GoogleService(self.config_manager)
-                self.logger.info(f"Google credentials found at: {google_credentials}")
-                self.logger.info("Google service initialized")
+                
+                # Verificar se o serviço está disponível
+                if hasattr(self.google_service, 'is_available') and self.google_service.is_available():
+                    self.logger.info(f"Google credentials encontrado em: {google_credentials}")
+                    self.logger.info("Serviço Google inicializado")
+                    available_services['google'] = self.google_service
+                else:
+                    self.logger.warning("Serviço Google não está disponível")
             else:
-                self.logger.info("Google credentials not configured")
+                self.logger.info("Google credentials não configurado")
             
-            # Initialize local whisper service
-            self.logger.info("Initializing Local Whisper service...")
+            # Initialize API Whisper service
+            whisper_key = self.config_manager.get_value("recognition", "whisper_api_key", "")
+            if whisper_key:
+                self.logger.info("Inicializando serviço Whisper API...")
+                self.whisper_service = WhisperService(self.config_manager)
+                
+                # Verificar se o serviço está disponível
+                if hasattr(self.whisper_service, 'test_connection'):
+                    test_result = self.whisper_service.test_connection()
+                    if test_result.get('success', False):
+                        self.logger.info("Serviço Whisper API inicializado com sucesso")
+                        available_services['whisper'] = self.whisper_service
+                    else:
+                        self.logger.warning(f"Falha ao testar Whisper API: {test_result.get('message', 'Erro desconhecido')}")
+                else:
+                    self.logger.info("Serviço Whisper API inicializado")
+                    available_services['whisper'] = self.whisper_service
+            else:
+                self.logger.info("Whisper API key não configurada")
+            
+            # Initialize local whisper service (apenas para registrar existência, não usado como fallback)
+            self.logger.info("Verificando disponibilidade de serviço Local Whisper...")
             self.local_whisper_service = LocalWhisperService(self.config_manager)
-            self.logger.info("Local Whisper service initialized")
             
             # Set language for recognition
             self.language = self.config_manager.get_value("recognition", "language", "pt-PT")
@@ -253,92 +340,163 @@ class DictationManager:
             self.service = self._get_service(service_name)
             
             if self.service:
-                self.logger.info(f"Using recognition service: {service_name}")
-                self.logger.warning(f"Recognition service initialized: {service_name}")
-                self.logger.info(f"Recognition language: {self.language}")
+                self.logger.info(f"Usando serviço de reconhecimento: {service_name}")
+                self.logger.warning(f"Serviço de reconhecimento inicializado: {service_name}")
+                self.logger.info(f"Idioma de reconhecimento: {self.language}")
+                self.recognition_service = service_name
             else:
-                self.logger.error(f"Failed to initialize recognition service: {service_name}")
-                # Try to use a fallback service
-                if self.azure_service:
-                    self.logger.warning("Using Azure as fallback recognition service")
-                    self.service = self.azure_service
-                    self.recognition_service = 'azure'
-                elif self.local_whisper_service:
-                    self.logger.warning("Using Local Whisper as fallback recognition service")
-                    self.service = self.local_whisper_service
-                    self.recognition_service = 'whisper_local'
-            
-            # Initialize translator services
-            translator_service_name = self.config_manager.get_value("translation", "service", "azure_openai")
-            self.translation_service_name = translator_service_name
-            self.logger.info(f"Initializing translator service: {translator_service_name}")
-            
-            # Initialize Azure translator
-            azure_translator_key = self.config_manager.get_value("translation", "azure_translator_key", "")
-            azure_translator_region = self.config_manager.get_value("translation", "azure_translator_region", "westeurope")
-            
-            if azure_translator_key:
-                self.logger.info("Initializing Azure Translator service...")
-                self.azure_translator_service = AzureTranslatorService(self.config_manager)
-                self.logger.info("Azure Translator service initialized")
-            
-            # Initialize Azure OpenAI translator
-            azure_openai_key = self.config_manager.get_value("translation", "azure_openai_key", "")
-            azure_openai_endpoint = self.config_manager.get_value("translation", "azure_openai_endpoint", "")
-            # Usar um modelo de deployment mais comum por padrão (gpt-35-turbo em vez de gpt-4o)
-            azure_openai_deployment = self.config_manager.get_value("translation", "azure_openai_deployment", "gpt-35-turbo")
-            
-            if azure_openai_key and azure_openai_endpoint:
-                self.logger.info("Initializing Azure OpenAI service...")
-                # Log detalhado das configurações do Azure OpenAI
-                self.logger.info(f"Azure OpenAI endpoint: {azure_openai_endpoint}")
-                self.logger.info(f"Azure OpenAI deployment: {azure_openai_deployment}")
+                self.logger.error(f"Falha ao inicializar serviço de reconhecimento: {service_name}")
                 
-                # Remover barras extras no final da URL se existirem
-                if azure_openai_endpoint.endswith("/"):
-                    azure_openai_endpoint = azure_openai_endpoint.rstrip("/")
-                    self.logger.info(f"Sanitized Azure OpenAI endpoint: {azure_openai_endpoint}")
+                # Verificar se foi solicitada uma API (não serviço local)
+                is_api_service = service_name in ['azure', 'whisper', 'google']
                 
-                self.azure_openai_service = AzureOpenAIService(
-                    api_key=azure_openai_key, 
-                    endpoint=azure_openai_endpoint,
-                    deployment_name=azure_openai_deployment
-                )
-                self.logger.warning("Azure OpenAI service initialized successfully")
+                # Verificar se há algum serviço API disponível como fallback
+                api_services = {k: v for k, v in available_services.items() if k in ['azure', 'whisper', 'google']}
+                
+                if is_api_service and not api_services:
+                    # Se foi solicitada uma API e nenhuma API está disponível, mostrar erro ao usuário
+                    from PyQt5.QtWidgets import QMessageBox
+                    QMessageBox.critical(
+                        None,
+                        "Erro de Serviço de Reconhecimento",
+                        f"O serviço de reconhecimento {service_name} não está disponível. Verifique sua conexão com a internet e as chaves de API nas configurações.",
+                        QMessageBox.Ok
+                    )
+                    return
+                
+                # Se solicitou uma API mas ela falhou, tentar outra API (não serviço local)
+                if is_api_service and api_services:
+                    fallback_name, fallback_service = next(iter(api_services.items()))
+                    self.logger.warning(f"Usando {fallback_name} como serviço fallback de reconhecimento (apenas APIs)")
+                    self.service = fallback_service
+                    self.recognition_service = fallback_name
+                else:
+                    self.logger.error("Não foi possível encontrar um serviço de API disponível!")
             
-            # Initialize M2M100 translator
-            self.logger.info("Initializing M2M100 translator service...")
-            self.m2m100_translator_service = M2M100TranslatorService(self.config_manager)
-            self.logger.info("M2M100 translator service initialized")
+            # Inicializar serviços de tradução
+            self._initialize_translation_services()
             
-            # Initialize Local LLM translator
-            self.logger.info("Initializing Local LLM translator service...")
-            self.local_llm_translator_service = LocalLLMTranslatorService(self.config_manager)
-            self.logger.info("Local LLM translator service initialized")
-            
-            # Set translation service based on configuration
-            self.translator_service = self._get_translator_service(translator_service_name)
-            if self.translator_service:
-                self.logger.warning(f"Translation service initialized: {translator_service_name}")
-            else:
-                self.logger.error(f"Failed to initialize translation service: {translator_service_name}")
-                # Try fallback
-                if self.azure_openai_service:
-                    self.logger.warning("Using Azure OpenAI as fallback translation service")
-                    self.translator_service = self.azure_openai_service
-                    self.translation_service_name = "azure_openai"
-                elif self.azure_translator_service:
-                    self.logger.warning("Using Azure Translator as fallback translation service")
-                    self.translator_service = self.azure_translator_service
-                    self.translation_service_name = "azure_translator"
-                    
-            # Set target language for translation
-            self.target_language = self.config_manager.get_value("translation", "target_language", "en-US")
-            self.logger.info(f"Translation target language: {self.target_language}")
+            # Verificação final
+            self.logger.info(f"Serviços disponíveis: {', '.join(available_services.keys())}")
+            self.logger.info(f"Serviço de reconhecimento selecionado: {self.recognition_service}")
+            self.logger.info(f"Serviço de tradução selecionado: {self.translation_service_name}")
             
         except Exception as e:
-            self.logger.error(f"Error initializing services: {str(e)}")
-            self.logger.error(traceback.format_exc())
+            self.logger.error(f"Erro ao inicializar serviços: {str(e)}")
+            
+    def _initialize_translation_services(self):
+        """Inicializa serviços de tradução"""
+        # Inicializar atributos de serviço padrão para evitar AttributeError
+        self.azure_translator_service = None
+        self.azure_openai_service = None 
+        self.m2m100_translator_service = None
+        self.local_llm_translator_service = None
+        self.translator_service = None
+        
+        # Obter serviço configurado
+        translator_service_name = self.config_manager.get_value("translation", "service", "azure_openai")
+        self.translation_service_name = translator_service_name
+        self.logger.info(f"Inicializando serviço de tradução: {translator_service_name}")
+        
+        # Lista para verificar serviços disponíveis
+        available_translation_services = {}
+        
+        # Initialize Azure translator
+        azure_translator_key = self.config_manager.get_value("translation", "azure_translator_key", "")
+        azure_translator_region = self.config_manager.get_value("translation", "azure_translator_region", "westeurope")
+        
+        if azure_translator_key:
+            self.logger.info("Inicializando serviço Azure Translator...")
+            self.azure_translator_service = AzureTranslatorService(self.config_manager)
+            
+            # Verificar se o serviço está disponível
+            if hasattr(self.azure_translator_service, 'is_configured') and self.azure_translator_service.is_configured():
+                self.logger.info("Serviço Azure Translator inicializado com sucesso")
+                available_translation_services['azure_translator'] = self.azure_translator_service
+        
+        # Initialize Azure OpenAI translator
+        azure_openai_key = self.config_manager.get_value("translation", "azure_openai_key", "")
+        azure_openai_endpoint = self.config_manager.get_value("translation", "azure_openai_endpoint", "")
+        azure_openai_deployment = self.config_manager.get_value("translation", "azure_openai_deployment", "")
+        
+        # Logs para diagnóstico
+        masked_key = azure_openai_key[:5] + "..." + azure_openai_key[-5:] if len(azure_openai_key) > 10 else "***" if azure_openai_key else "vazio"
+        self.logger.info(f"Chave Azure OpenAI carregada: {masked_key}")
+        self.logger.info(f"Endpoint Azure OpenAI: {azure_openai_endpoint}")
+        self.logger.info(f"Deployment Azure OpenAI: {azure_openai_deployment}")
+        
+        if azure_openai_key and azure_openai_endpoint:
+            self.logger.info("Inicializando serviço Azure OpenAI...")
+            
+            # Remove extra slashes at the end of the URL if they exist
+            if azure_openai_endpoint.endswith("/"):
+                azure_openai_endpoint = azure_openai_endpoint.rstrip("/")
+                self.logger.info(f"Endpoint Azure OpenAI sanitizado: {azure_openai_endpoint}")
+            
+            self.azure_openai_service = AzureOpenAIService(
+                api_key=azure_openai_key, 
+                endpoint=azure_openai_endpoint,
+                deployment_name=azure_openai_deployment
+            )
+            
+            # Verificar se o serviço está disponível
+            if hasattr(self.azure_openai_service, 'is_configured') and self.azure_openai_service.is_configured():
+                self.logger.info("Serviço Azure OpenAI inicializado com sucesso")
+                available_translation_services['azure_openai'] = self.azure_openai_service
+        
+        # Obter apenas serviços de API (sem serviços locais)
+        api_services = {k: v for k, v in available_translation_services.items() 
+                       if k in ['azure_translator', 'azure_openai']}
+        
+        # Verificar se o serviço solicitado é uma API e está disponível
+        is_api_service = translator_service_name in ['azure_translator', 'azure_openai']
+        service_available = translator_service_name in available_translation_services
+        
+        self.logger.info(f"Serviços de API disponíveis: {list(api_services.keys())}")
+        self.logger.info(f"Serviço solicitado '{translator_service_name}' disponível: {service_available}")
+        
+        # Se o serviço solicitado é uma API e está disponível, usá-lo
+        if is_api_service and service_available:
+            self.translator_service = available_translation_services[translator_service_name]
+            self.logger.info(f"Usando serviço de tradução API: {translator_service_name}")
+        # Se o serviço solicitado é uma API mas não está disponível
+        elif is_api_service and not service_available:
+            # Se há outras APIs disponíveis, usar como fallback
+            if api_services:
+                fallback_name, fallback_service = next(iter(api_services.items()))
+                self.translator_service = fallback_service
+                self.translation_service_name = fallback_name
+                self.logger.info(f"Serviço {translator_service_name} não disponível, usando {fallback_name} como fallback")
+            else:
+                # Se não há nenhuma API disponível, mostrar erro
+                self.logger.error("Nenhum serviço de tradução API disponível!")
+                from PyQt5.QtWidgets import QMessageBox
+                QMessageBox.critical(
+                    None,
+                    "Erro de Serviço de Tradução",
+                    f"O serviço de tradução {translator_service_name} não está disponível. Verifique sua conexão com a internet e as chaves de API nas configurações.",
+                    QMessageBox.Ok
+                )
+        # Se o serviço solicitado é local, verificar se há APIs disponíveis como fallback
+        elif not is_api_service and api_services:
+            fallback_name, fallback_service = next(iter(api_services.items()))
+            self.translator_service = fallback_service
+            self.translation_service_name = fallback_name
+            self.logger.info(f"Serviço local solicitado, mas usando API {fallback_name} em vez disso")
+        else:
+            # Se não há opções de API disponíveis
+            self.logger.error("Não foi possível encontrar um serviço de tradução API disponível!")
+            from PyQt5.QtWidgets import QMessageBox
+            QMessageBox.critical(
+                None,
+                "Erro de Serviço de Tradução",
+                "Nenhum serviço de tradução API está disponível. Verifique sua conexão com a internet e as chaves de API nas configurações.",
+                QMessageBox.Ok
+            )
+        
+        # Definir target language
+        self.target_language = self.config_manager.get_value("translation", "target_language", "en-US")
+        self.logger.info(f"Idioma alvo para tradução: {self.target_language}")
     
     def start_dictation(self):
         """Start dictation"""
@@ -347,12 +505,12 @@ class DictationManager:
                 self.logger.warning("Dictation already started")
                 return False
             
-            # Configurar VAD para ser mais sensível
+            # Configure VAD to be more sensitive
             self.vad_enabled = False
-            self.vad_threshold = 0.0001  # Reduzido para ser mais sensível
+            self.vad_threshold = 0.0001  # Reduced to be more sensitive
             self.vad_silence_duration = 0.5
             
-            # Salvar configurações atualizadas no arquivo de configuração
+            # Save updated configurations to config file
             self._save_vad_settings()
             
             self.logger.warning(f"VAD status: enabled={self.vad_enabled}, threshold={self.vad_threshold}, silence_duration={self.vad_silence_duration}")
@@ -374,7 +532,7 @@ class DictationManager:
             # Clean up any existing streams to avoid resource leaks
             self._cleanup_streams()
             
-            # Inicializar propriedades de gravação
+            # Initialize recording properties
             self.audio_buffer = []
             self.audio_queue = queue.Queue()
             self.processing_queue = queue.Queue()
@@ -383,7 +541,7 @@ class DictationManager:
             self.recording_thread = None
             self.processing_thread = None
             
-            # Configurar áudio antes de iniciar gravação
+            # Configure audio before starting recording
             self.audio_config = {
                 'chunk_size': 1024,
                 'format': pyaudio.paInt16,
@@ -393,7 +551,7 @@ class DictationManager:
             }
             self.logger.info("Audio configuration set")
             
-            # Definir modo de callback como falso
+            # Set callback mode to False
             self.audio_callback_mode = False
             
             # Start the actual recording process
@@ -403,26 +561,26 @@ class DictationManager:
             
             self.logger.warning(f"Starting dictation with language: {self.language}")
             
-            # Marcar como gravando e processando
+            # Mark as recording and processing
             self.is_recording = True
             self.is_processing = True
             
-            # Iniciar nova thread de gravação
+            # Start new recording thread
             self.recording_thread = threading.Thread(target=self._record_audio, daemon=True)
             self.recording_thread.start()
             
-            # Iniciar thread de processamento de áudio para consumir da fila
+            # Start thread for audio processing to consume from queue
             self.processing_thread = threading.Thread(target=self._process_audio_loop, daemon=True)
             self.processing_thread.start()
             
-            # Configurar timestamp para estatísticas
+            # Configure timestamp for statistics
             self.start_time = time.time()
             
-            # Emitir sinal sonoro para indicar início (opcional, conforme configuração)
+            # Emit sound to indicate start (optional, according to configuration)
             if self.config_manager.get_value("audio", "play_sounds", True):
                 self.play_start_sound()
             
-            # Log de início bem-sucedido
+            # Log successful start
             self.logger.info(f"Dictation started with language: {self.language}")
             
             return True
@@ -446,12 +604,12 @@ class DictationManager:
     
     def stop_dictation(self):
         """Stop dictation"""
-        # Reduzir o atraso para capturar o final da fala
+        # Reduce delay to capture the end of speech
         post_recording_delay = self.config_manager.get_value("recording", "post_recording_delay", 0.5)
-        # Usar um valor menor para reduzir a latência
-        actual_delay = min(post_recording_delay, 0.1)  # Limitamos a 100ms máximo
+        # Use a smaller value to reduce latency
+        actual_delay = min(post_recording_delay, 0.1)  # We limit to a maximum of 100ms
         if actual_delay > 0:
-            self.logger.debug(f"Aguardando {actual_delay:.2f} segundos para capturar o final da fala...")
+            self.logger.debug(f"Waiting {actual_delay:.2f} seconds to capture the end of speech...")
             time.sleep(actual_delay)
             
         if not self.is_recording:
@@ -460,24 +618,24 @@ class DictationManager:
         
         self.logger.warning("Stopping dictation")
         
-        # Stop recording - desative antes de processar áudio
+        # Stop recording - disable before processing audio
         self.is_recording = False
-        self.continuous_recording = False  # Desativar gravação contínua
+        self.continuous_recording = False  # Disable continuous recording
         
-        # Aguardar a thread de gravação terminar
+        # Wait for recording thread to finish
         if self.recording_thread and self.recording_thread.is_alive():
             self.logger.info("Waiting for recording thread to finish")
-            self.recording_thread.join(timeout=2.0)  # Timeout para evitar bloqueio
+            self.recording_thread.join(timeout=2.0)  # Timeout to avoid blocking
             if self.recording_thread.is_alive():
                 self.logger.warning("Recording thread did not exit within timeout, continuing anyway")
         
-        # Este delay é importante para dar tempo ao _process_audio_loop reconhecer que 
-        # a gravação parou e processar o áudio acumulado
+        # This delay is important to give time for _process_audio_loop to recognize that 
+        # recording has stopped and process the accumulated audio
         time.sleep(1.0)
         
-        # Encerrar a thread de processamento só depois de um tempo
-        # para garantir que todo o áudio foi processado
-        time.sleep(1.5)  # Mais tempo para processamento completo
+        # End processing thread only after a certain time
+        # to ensure that all audio has been processed
+        time.sleep(1.5)  # More time for complete processing
         self.is_processing = False
         
         if self.processing_thread and self.processing_thread.is_alive():
@@ -668,11 +826,17 @@ class DictationManager:
         """Obter serviço Azure Speech para reconhecimento de fala"""
         # Verificar credenciais do Azure
         api_key = self.config_manager.get_value("recognition", "azure_api_key", "")
+        
+        # Se não encontrar no campo principal, tentar campo alternativo
+        if not api_key:
+            self.logger.warning("Azure API key não encontrada em 'azure_api_key', tentando campo alternativo 'azure_key'")
+            api_key = self.config_manager.get_value("recognition", "azure_key", "")
+            
         region = self.config_manager.get_value("recognition", "azure_region", "westeurope")
         
         # Log para diagnóstico
         if not api_key:
-            self.logger.error("Azure API key is empty or not configured")
+            self.logger.error("Azure API key is empty or not configured (tentadas chaves 'azure_api_key' e 'azure_key')")
             return None
         else:
             # Mostrar parte da chave por segurança
@@ -682,7 +846,12 @@ class DictationManager:
         self.logger.info(f"Azure region configured: {region}")
         
         if api_key and region:
-            return AzureService(self.config_manager)
+            # Criar um service com explicitamente a API key e região
+            azure_service = AzureService(self.config_manager)
+            # Forçar atualização das credenciais para garantir
+            if hasattr(azure_service, 'update_credentials'):
+                azure_service.update_credentials(api_key, region)
+            return azure_service
         
         return None
     
@@ -702,187 +871,230 @@ class DictationManager:
         return GoogleService(self.config_manager)
         
     def _get_translator_service(self, service_name):
-        """Get a translation service by name"""
-        try:
-            # Mapeamento de serviços para seus respectivos objetos
-            translator_mapping = {
-                "azure": self._get_azure_translator_service,  # Alias "azure" para azure_translator
-                "azure_translator": self._get_azure_translator_service,
-                "m2m100": lambda: self.m2m100_translator_service,
-                "azure_openai": self._get_azure_openai_service,
-                "local_llm": lambda: self.local_llm_translator_service
-            }
-            
-            # Log para diagnóstico da seleção de serviço
-            self.logger.info(f"Selecionando serviço de tradução: {service_name}")
-            
-            # Verificar se o serviço está no mapeamento
-            if service_name in translator_mapping:
-                service = translator_mapping[service_name]()
-                if service:
-                    self.logger.info(f"Usando serviço de tradução: {service_name}")
-                    return service
-            
-            # Se o serviço solicitado não existe ou não retornou um objeto válido
-            self.logger.warning(f"Translation service {service_name} not available, falling back to M2M100")
-            return self.m2m100_translator_service
-            
-        except Exception as e:
-            return self._handle_exception("_get_translator_service", e, self.m2m100_translator_service)
-            
-    def _get_azure_translator_service(self):
-        """Obter serviço Azure Translator para tradução"""
-        api_key = self.config_manager.get_value("translation", "azure_translator_key", "")
-        region = self.config_manager.get_value("translation", "azure_translator_region", "westeurope")
-        
-        if api_key and region:
-            return self.azure_translator_service
-        else:
-            self.logger.warning("Azure Translator credentials not configured properly")
-            return None
-            
-    def _get_azure_openai_service(self):
-        """Obter serviço Azure OpenAI para tradução"""
-        api_key = self.config_manager.get_value("translation", "azure_openai_key", "")
-        
-        if api_key and hasattr(self, 'azure_openai_service'):
-            return self.azure_openai_service
-        else:
-            self.logger.warning("Azure OpenAI credentials not configured properly")
-            return None
-    
-    def _recognize_with_selected_service(self, audio_file, service_name=None, auto_translate=True, target_language=None):
-        """Recognize speech from audio file using the selected recognition service
+        """Get a translator service by name
         
         Args:
-            audio_file (str): Path to the audio file
-            service_name (str, optional): Name of the recognition service to use. 
-                                         If None, use the configured service.
-            auto_translate (bool, optional): Whether to translate the recognized text
-            target_language (str, optional): Target language for translation
+            service_name (str): Service name
             
         Returns:
-            str: Recognized text (and translated if auto_translate is True)
+            object: Translator service
+        """
+        self.logger.info(f"Obtendo serviço de tradução: {service_name}")
+        
+        # Verificar se os serviços já foram inicializados
+        if not hasattr(self, 'azure_translator_service') or not hasattr(self, 'azure_openai_service'):
+            self.logger.warning("Serviços de tradução não inicializados. Tentando inicializar novamente.")
+            self._initialize_translation_services()
+        
+        # Verifica tipo de serviço e retorna o apropriado
+        if service_name == "azure_translator":
+            # Verificação detalhada do serviço Azure Translator
+            if hasattr(self, 'azure_translator_service') and self.azure_translator_service is not None:
+                if hasattr(self.azure_translator_service, 'is_configured') and self.azure_translator_service.is_configured():
+                    self.logger.info("Retornando serviço Azure Translator configurado")
+                    return self.azure_translator_service
+                else:
+                    self.logger.warning("Serviço Azure Translator existe mas não está configurado corretamente")
+            else:
+                self.logger.warning("Serviço Azure Translator não está disponível")
+                
+        elif service_name == "azure_openai":
+            # Verificação detalhada do serviço Azure OpenAI
+            if hasattr(self, 'azure_openai_service') and self.azure_openai_service is not None:
+                self.logger.info(f"Serviço Azure OpenAI encontrado: {self.azure_openai_service}")
+                
+                # Verificar configuração
+                if hasattr(self.azure_openai_service, 'is_configured'):
+                    is_configured = self.azure_openai_service.is_configured()
+                    self.logger.info(f"Azure OpenAI está configurado: {is_configured}")
+                    
+                    if is_configured:
+                        self.logger.info("Retornando serviço Azure OpenAI configurado")
+                        return self.azure_openai_service
+                    else:
+                        # Tentar reconfigurar
+                        self.logger.warning("Tentando reconfigurar o serviço Azure OpenAI")
+                        azure_openai_key = self.config_manager.get_value("translation", "azure_openai_key", "")
+                        azure_openai_endpoint = self.config_manager.get_value("translation", "azure_openai_endpoint", "")
+                        azure_openai_deployment = self.config_manager.get_value("translation", "azure_openai_deployment", "")
+                        
+                        # Log de depuração
+                        self.logger.info(f"Reconfigurando com: Key={bool(azure_openai_key)}, Endpoint={azure_openai_endpoint}, Deployment={azure_openai_deployment}")
+                        
+                        if hasattr(self.azure_openai_service, 'update_credentials'):
+                            success = self.azure_openai_service.update_credentials(
+                                azure_openai_key, 
+                                azure_openai_endpoint,
+                                azure_openai_deployment
+                            )
+                            
+                            if success:
+                                self.logger.info("Serviço Azure OpenAI reconfigurado com sucesso")
+                                return self.azure_openai_service
+                            else:
+                                self.logger.error("Falha ao reconfigurar o serviço Azure OpenAI")
+                        else:
+                            self.logger.error("Serviço Azure OpenAI não tem método update_credentials")
+                else:
+                    self.logger.warning("Serviço Azure OpenAI não tem método is_configured")
+            else:
+                self.logger.warning("Serviço Azure OpenAI não está disponível")
+                
+                # Tentar inicializar o serviço
+                self.logger.info("Tentando inicializar o serviço Azure OpenAI")
+                try:
+                    from src.services.azure_openai_service import AzureOpenAIService
+                    
+                    azure_openai_key = self.config_manager.get_value("translation", "azure_openai_key", "")
+                    azure_openai_endpoint = self.config_manager.get_value("translation", "azure_openai_endpoint", "")
+                    azure_openai_deployment = self.config_manager.get_value("translation", "azure_openai_deployment", "")
+                    
+                    if azure_openai_key and azure_openai_endpoint and azure_openai_deployment:
+                        self.logger.info("Inicializando serviço Azure OpenAI a partir do zero")
+                        self.azure_openai_service = AzureOpenAIService(
+                            api_key=azure_openai_key,
+                            endpoint=azure_openai_endpoint,
+                            deployment_name=azure_openai_deployment
+                        )
+                        
+                        if hasattr(self.azure_openai_service, 'is_configured') and self.azure_openai_service.is_configured():
+                            self.logger.info("Serviço Azure OpenAI inicializado com sucesso")
+                            return self.azure_openai_service
+                except Exception as e:
+                    self.logger.error(f"Erro ao inicializar serviço Azure OpenAI: {str(e)}")
+        
+        # Se chegar aqui, o serviço solicitado não está disponível
+        # Tentar serviço alternativo de API
+        self.logger.warning(f"Serviço {service_name} não disponível, procurando alternativa")
+        
+        # Verificar Azure OpenAI como alternativa
+        if service_name != "azure_openai" and hasattr(self, 'azure_openai_service') and self.azure_openai_service is not None:
+            if hasattr(self.azure_openai_service, 'is_configured') and self.azure_openai_service.is_configured():
+                self.logger.info("Usando Azure OpenAI como alternativa")
+                return self.azure_openai_service
+        
+        # Verificar Azure Translator como alternativa
+        if service_name != "azure_translator" and hasattr(self, 'azure_translator_service') and self.azure_translator_service is not None:
+            if hasattr(self.azure_translator_service, 'is_configured') and self.azure_translator_service.is_configured():
+                self.logger.info("Usando Azure Translator como alternativa")
+                return self.azure_translator_service
+        
+        self.logger.error("Nenhum serviço de tradução API disponível!")
+        return None
+    
+    def _recognize_with_selected_service(self, audio_file, service_name=None, auto_translate=True, target_language=None):
+        """Reconhece fala usando o serviço selecionado
+        
+        Args:
+            audio_file (str): O arquivo de áudio a ser reconhecido
+            service_name (str, optional): O nome do serviço a ser usado
+            auto_translate (bool, optional): Se deve traduzir automaticamente
+            target_language (str, optional): O idioma de destino para tradução
+            
+        Returns:
+            str: O texto reconhecido
         """
         try:
-            # Verificar se o arquivo existe
-            if not os.path.exists(audio_file):
-                self.logger.error(f"Audio file does not exist: {audio_file}")
-                return None
-                
-            # Obter serviço de reconhecimento
+            # Forçar uso do idioma pt-PT para reconhecimento sempre
+            recognition_language = "pt-PT"
+            self.logger.warning(f"Forçando idioma de reconhecimento para: {recognition_language}")
+            
+            # Verificar se estamos usando language_rules em modo avançado
+            if hasattr(self, 'language_rules') and self.language_rules:
+                mode = self.config_manager.get_value("language_rules", "mode", "simple")
+                if mode == "advanced":
+                    self.logger.info("Usando modo avançado de regras de idioma")
+                    # Em modo avançado, usar os language_rules
+                else:
+                    self.logger.info("Usando modo simples de regras de idioma")
+            
+            # Se nenhum serviço específico for fornecido, usar o padrão
             if not service_name:
-                service_name = self.config_manager.get_value("recognition", "service", "azure")
+                service_name = self.service_name if hasattr(self, 'service_name') else "azure"
                 
-            self.logger.info(f"Trying recognition with {service_name}")
+            self.logger.info(f"Recognizing audio with service: {service_name}, language: {recognition_language}")
             
-            # Selecionar o serviço apropriado
-            recognition_service = self.get_recognition_service(service_name)
-            
-            # Registrar tentativa de reconhecimento
-            if hasattr(self, 'stats_service') and self.stats_service:
-                if hasattr(self.stats_service, 'add_recognition_attempt'):
-                    self.stats_service.add_recognition_attempt(service_name, self.current_language)
+            # Verificar se o serviço existe
+            service_instance = self.get_recognition_service(service_name)
+            if not service_instance:
+                self.logger.error(f"Service {service_name} not found, trying alternative services")
+                # Tentar encontrar um serviço alternativo
+                for alt_service in ["azure", "whisper", "google", "local_whisper"]:
+                    if alt_service != service_name:
+                        self.logger.info(f"Trying alternative service: {alt_service}")
+                        service_instance = self.get_recognition_service(alt_service)
+                        if service_instance:
+                            self.logger.info(f"Using alternative service: {alt_service}")
+                            service_name = alt_service
+                            break
                 
-            # Se não encontrar o serviço, tentar serviço reserva
-            if not recognition_service:
-                fallback = self.config_manager.get_value("recognition", "fallback_service", "whisper")
-                self.logger.warning(f"Recognition service {service_name} not available, trying fallback: {fallback}")
-                recognition_service = self.get_recognition_service(fallback)
-                
-                if not recognition_service:
+                # Se ainda não encontrou um serviço, falhar
+                if not service_instance:
                     self.logger.error("No recognition service available")
-                    return None
-                    
-                # Atualizar o nome do serviço
-                service_name = fallback
+                    return "Error: No recognition service available"
+            
+            # Realizar reconhecimento
+            self.logger.info(f"Recognizing with {service_name} in language '{recognition_language}'")
+            recognized_text = service_instance.recognize_speech(audio_file, recognition_language)
+            
+            # Verificar se o reconhecimento foi bem-sucedido
+            if not recognized_text:
+                self.logger.warning("No text recognized")
+                return ""
                 
-            # Tentar reconhecimento
-            start_time = time.time()
+            # Registrar resultado do reconhecimento inicial
+            self.logger.info(f"Recognition result: '{recognized_text}'")
             
-            # Verificar o método disponível para o serviço
-            if hasattr(recognition_service, 'recognize_speech'):
-                result = recognition_service.recognize_speech(audio_file, self.current_language)
-            elif hasattr(recognition_service, 'recognize_audio'):
-                result = recognition_service.recognize_audio(audio_file, self.current_language)
-            elif hasattr(recognition_service, 'recognize'):
-                result = recognition_service.recognize(audio_file, self.current_language)
-            else:
-                self.logger.error(f"Recognition service {service_name} has no recognition method")
-                return None
+            # Determinar se precisamos traduzir
+            perform_translation = False
+            if auto_translate:
+                # Se temos idioma de destino explícito, verificar se é diferente do idioma de reconhecimento
+                if target_language and target_language != recognition_language:
+                    perform_translation = True
+                    self.logger.info(f"Auto-translation enabled, target_language ({target_language}) differs from recognition_language ({recognition_language})")
+                # Se não temos idioma de destino explícito, verificar se auto_translate está ativado e usar target_language padrão
+                elif hasattr(self, 'auto_translate') and self.auto_translate:
+                    default_target = getattr(self, 'target_language', 'en-US')
+                    if default_target != recognition_language:
+                        perform_translation = True
+                        target_language = default_target
+                        self.logger.info(f"Auto-translation enabled, using default target_language: {target_language}")
+            
+            # Traduzir se necessário
+            if perform_translation and recognized_text:
+                source_lang = recognition_language
+                # Se não temos idioma de destino explícito, usar o padrão da classe
+                if not target_language and hasattr(self, 'target_language'):
+                    target_language = self.target_language
                 
-            end_time = time.time()
-            recognition_time = end_time - start_time
+                # Traduzir o texto
+                if target_language and target_language != source_lang:
+                    self.logger.info(f"Translating from {source_lang} to {target_language}")
+                    original_text = recognized_text
+                    try:
+                        # Traduzir usando o método específico
+                        translated_text = self._translate_text(recognized_text, source_lang, target_language)
+                        
+                        # Verificar se a tradução foi bem-sucedida
+                        if translated_text and translated_text != recognized_text:
+                            self.logger.info(f"Translation successful: '{recognized_text}' -> '{translated_text}'")
+                            recognized_text = translated_text
+                        else:
+                            self.logger.warning(f"Translation failed or returned same text, using original: '{recognized_text}'")
+                    except Exception as e:
+                        self.logger.error(f"Error during translation: {str(e)}")
+                        self.logger.error(traceback.format_exc())
+                        # Manter o texto original em caso de erro na tradução
+                        self.logger.warning(f"Using original text due to translation error: '{recognized_text}'")
             
-            # Verificar resultado
-            if not result:
-                self.logger.warning(f"Recognition with {service_name} failed or returned empty result")
-                return None
-                
-            # Extrair texto do resultado (pode ser string ou dicionário)
-            recognized_text = ""
-            confidence = 0.0
-            
-            if isinstance(result, dict):
-                # Se for um dicionário, extrair texto e confiança
-                recognized_text = result.get('text', '')
-                confidence = result.get('confidence', 0.0)
-            elif isinstance(result, str):
-                # Se for uma string, usar diretamente
-                recognized_text = result
-            else:
-                # Tentar converter para string
-                try:
-                    recognized_text = str(result)
-                except:
-                    self.logger.error(f"Could not convert recognition result to text: {type(result)}")
-                    return None
-                    
-            # Verificar se o texto está vazio
-            if not recognized_text or recognized_text.strip() == '':
-                self.logger.warning(f"Recognition with {service_name} returned empty text")
-                return None
-                
-            # Aplicar formatação e pós-processamento
-            processed_text = self._post_process_text(recognized_text)
-            
-            # Log do resultado
-            self.logger.info(f"Recognition successful in {recognition_time:.2f}s with {service_name}")
-            
-            # Definir o idioma alvo para tradução
-            if not target_language:
-                target_language = self.target_language
-                
-            # Tradução automática se configurada E se os idiomas de origem e destino forem diferentes
-            if auto_translate and self.current_language != target_language:
-                try:
-                    self.logger.info(f"Auto-translating from {self.current_language} to {target_language}")
-                    translated_text = self._translate_text(
-                        processed_text, 
-                        source_lang=self.current_language, 
-                        target_lang=target_language
-                    )
-                    
-                    if translated_text and translated_text.strip() != '':
-                        self.logger.info(f"Translation successful: '{processed_text}' -> '{translated_text}'")
-                        processed_text = translated_text
-                    else:
-                        self.logger.warning("Translation failed or returned empty result")
-                except Exception as e:
-                    self.logger.error(f"Error during translation: {str(e)}")
-                    self.logger.error(traceback.format_exc())
-            else:
-                if auto_translate and self.current_language == target_language:
-                    self.logger.info(f"Skipping translation: source language ({self.current_language}) and target language ({target_language}) are the same")
-                elif not auto_translate:
-                    self.logger.info("Auto-translation disabled")
-            
-            return processed_text
+            # Retornar o texto reconhecido e possivelmente traduzido
+            self.logger.info(f"Recognized text: {recognized_text}")
+            return recognized_text
             
         except Exception as e:
-            self.logger.error(f"Error in recognition with {service_name}: {str(e)}")
+            self.logger.error(f"Error in recognize_with_selected_service: {str(e)}")
             self.logger.error(traceback.format_exc())
-            return None
+            return f"Error: {str(e)}"
 
     def get_recognition_service(self, service_name):
         """Get the recognition service by name"""
@@ -918,8 +1130,16 @@ class DictationManager:
                 self.pyaudio = pyaudio.PyAudio()
                 self.logger.debug("PyAudio instance created")
             
-            # Obter ID do microfone das configurações
+            # Obter ID do microfone das configurações usando a chave padrão
             mic_id = self.config_manager.get_value("audio", "microphone_id", 0)
+            # Verificar também a chave alternativa se a padrão não retornar valor
+            if mic_id is None or mic_id == 0:
+                mic_id = self.config_manager.get_value("audio", "default_microphone_id", 0)
+            
+            # Usar o ID armazenado na instância se tudo falhar
+            if mic_id is None or mic_id == 0:
+                mic_id = self.default_mic_id
+            
             self.logger.info(f"Using microphone with ID: {mic_id}")
             
             # Testar microfone para garantir que está disponível
@@ -1621,16 +1841,98 @@ class DictationManager:
         return self.current_language
     
     def set_language(self, language):
-        """Set the language for dictation"""
-        self.language = language
-        self.current_language = language
-        self.logger.info(f"Language set to: {language}")
-
-    def stop(self):
-        """Alias para stop_dictation() para compatibilidade com código existente"""
-        self.logger.debug("stop() called as alias for stop_dictation()")
-        self.stop_dictation()
+        """Set the language for speech recognition
         
+        Args:
+            language (str): The language code (e.g., 'en-US', 'pt-PT')
+        """
+        try:
+            self.logger.info(f"Setting recognition language to {language}")
+            self.language = language
+            
+            # Persistir a alteração na configuração
+            self.config_manager.set_value("recognition", "language", language)
+            self.config_manager.save_config()
+            
+            # Log detalhado para garantir que a configuração foi salva
+            self.logger.info(f"Language saved in config: {self.config_manager.get_value('recognition', 'language')}")
+            
+            return True
+        except Exception as e:
+            self.logger.error(f"Failed to set language to {language}: {str(e)}")
+            self.logger.error(traceback.format_exc())
+            return False
+    
+    def set_microphone(self, mic_id):
+        """Set the microphone for recording
+        
+        Args:
+            mic_id (int): The ID of the microphone to use
+        """
+        self.logger.info(f"Setting microphone ID to: {mic_id}")
+        self.default_mic_id = mic_id
+        
+        # Usar chaves consistentes no config_manager
+        self.config_manager.set_value("audio", "microphone_id", mic_id)
+        self.config_manager.set_value("audio", "default_microphone_id", mic_id)
+        
+        # Atualizar o nome do microfone nas configurações, se disponível
+        try:
+            microphones = self.get_microphones()
+            for mic in microphones:
+                if mic["id"] == mic_id:
+                    self.config_manager.set_value("audio", "default_microphone", mic["name"])
+                    break
+        except Exception as e:
+            self.logger.error(f"Error updating microphone name: {str(e)}")
+        
+        # Salvar alterações imediatamente com force=True para garantir persistência
+        self.config_manager.save_config(force=True)
+        self.logger.info(f"Microphone settings saved with ID: {mic_id}")
+    
+    def stop(self):
+        """Stop all processing and threads"""
+        self.logger.info("Stopping DictationManager")
+        self.stop_flag = True
+        
+        # Garantir que todas as configurações sejam salvas
+        if hasattr(self, 'config_manager') and hasattr(self.config_manager, 'ensure_saved'):
+            try:
+                self.config_manager.ensure_saved()
+                self.logger.info("Configurações salvas com sucesso durante o encerramento")
+            except Exception as e:
+                self.logger.error(f"Erro ao salvar configurações durante encerramento: {str(e)}")
+        
+        # Encerrar recursos de áudio
+        if hasattr(self, 'audio_stream') and self.audio_stream:
+            self.logger.info("Closing audio stream")
+            try:
+                if self.audio_stream.is_active():
+                    self.audio_stream.stop_stream()
+                self.audio_stream.close()
+                self.audio_stream = None
+            except Exception as e:
+                self.logger.error(f"Error closing audio stream: {str(e)}")
+        
+        if hasattr(self, 'pyaudio') and self.pyaudio:
+            self.logger.info("Terminating PyAudio")
+            try:
+                self.pyaudio.terminate()
+                self.pyaudio = None
+            except Exception as e:
+                self.logger.error(f"Error terminating PyAudio: {str(e)}")
+        
+        # Clear buffers
+        self.audio_buffer = []
+        if hasattr(self, 'audio_queue'):
+            while not self.audio_queue.empty():
+                try:
+                    self.audio_queue.get_nowait()
+                except:
+                    pass
+        
+        self.logger.info("DictationManager stopped")
+    
     def get_supported_languages(self):
         """Get list of supported languages for recognition
         
@@ -1700,6 +2002,8 @@ class DictationManager:
                 
                 # Save to config
                 self.config_manager.set_value("recognition", "service", service_name)
+                # Salvar configuração imediatamente com force=True
+                self.config_manager.save_config(force=True)
                 
                 # Log service change
                 self.logger.info(f"Changed speech recognition service to {service_name}")
@@ -1786,108 +2090,140 @@ class DictationManager:
     def set_target_language(self, target_language):
         """Define o idioma alvo para tradução."""
         self.target_language = target_language
+        self.config_manager.set_value("translation", "target_language", target_language)
+        # Salvar configuração
+        self.config_manager.save_config()
         self.logger.info(f"Target language set to: {target_language}")
     
     def _translate_text(self, text, source_lang=None, target_lang=None):
-        """Traduz o texto reconhecido para o idioma alvo
+        """
+        Translate text using the selected translation service
         
         Args:
-            text (str): Texto a ser traduzido
-            source_lang (str, optional): Idioma de origem. Se None, usa o idioma atual.
-            target_lang (str, optional): Idioma alvo. Se None, usa o idioma alvo configurado.
+            text (str): Text to translate
+            source_lang (str, optional): Source language. Defaults to None.
+            target_lang (str, optional): Target language. Defaults to None.
             
         Returns:
-            str: Texto traduzido ou o texto original em caso de erro
+            str: Translated text
         """
         try:
-            if not text:
-                self.logger.warning("No text to translate")
-                return ""
+            # Se o texto estiver vazio, retornar vazio
+            if not text or len(text.strip()) == 0:
+                return text
                 
-            # Definir idiomas padrão se não fornecidos
-            if not source_lang:
-                source_lang = self.current_language
+            # Obter idioma de origem
+            if source_lang is None:
+                source_lang = self.language
                 
-            if not target_lang:
+            # Obter idioma de destino
+            if target_lang is None:
                 target_lang = self.target_language
                 
-            # Verificar se os idiomas são iguais
-            if source_lang == target_lang:
-                self.logger.debug(f"Source and target languages are the same ({source_lang}), skipping translation")
-                return text
-                
-            # Log detalhado para depuração
             self.logger.info(f"Translating from {source_lang} to {target_lang}")
-            self.logger.debug(f"Original text: {text[:50]}..." if len(text) > 50 else f"Original text: {text}")
             
-            # Obter o serviço de tradução configurado
-            translator_service_name = self.config_manager.get_value("translation", "service", "azure")
+            # Verificar atributo para evitar erros
+            if not hasattr(self, 'translation_service_name') or self.translation_service_name is None:
+                self.translation_service_name = self.config_manager.get_value("translation", "service", "azure_openai")
+                self.logger.warning(f"Atributo translation_service_name não encontrado, usando valor do config: {self.translation_service_name}")
             
-            # Obter a instância do serviço de tradução
-            translator_service = self._get_translator_service(translator_service_name)
+            # Obter serviço de tradução
+            self.logger.info(f"Usando serviço de tradução: {self.translation_service_name}")
             
-            if not translator_service:
-                self.logger.error(f"Translation service '{translator_service_name}' not available")
-                return text
+            if not hasattr(self, 'translator_service') or self.translator_service is None:
+                self.translator_service = self._get_translator_service(self.translation_service_name)
                 
-            # Tentar traduzir com tratamento de erros mais robusto
-            start_time = time.time()
-            translated_text = None
-            
-            try:
-                # Configurar timeout para evitar bloqueio
-                timeout_sec = 30  # Timeout de 30 segundos
-                timeout_thread = threading.Timer(timeout_sec, lambda: self.logger.error(f"Translation timeout after {timeout_sec} seconds"))
-                timeout_thread.start()
+            if self.translator_service is None:
+                self.logger.error("Translator service not available")
                 
-                # Chamar o método de tradução
-                translated_text = translator_service.translate(text, source_lang, target_lang)
+                # Verificar se temos API keys configuradas
+                azure_openai_key = self.config_manager.get_value("translation", "azure_openai_key", "")
+                azure_openai_endpoint = self.config_manager.get_value("translation", "azure_openai_endpoint", "")
+                azure_openai_deployment = self.config_manager.get_value("translation", "azure_openai_deployment", "")
                 
-                # Cancelar timer de timeout
-                timeout_thread.cancel()
-                
-            except Exception as translate_error:
-                self.logger.error(f"Error during translation with {translator_service_name}: {str(translate_error)}")
-                self.logger.error(traceback.format_exc())
-                
-                # Se o serviço atual falhou e não era o M2M100, tentar M2M100 como último recurso
-                if translator_service_name != "m2m100" and hasattr(self, 'm2m100_translator_service'):
-                    self.logger.warning(f"Trying fallback translation with M2M100 after {translator_service_name} failed")
+                # Tentar inicializar o serviço manualmente
+                if azure_openai_key and azure_openai_endpoint and azure_openai_deployment:
+                    self.logger.info("Tentando inicializar o serviço Azure OpenAI manualmente")
                     try:
-                        translated_text = self.m2m100_translator_service.translate(text, source_lang, target_lang)
-                        translator_service_name = "m2m100"  # Atualizar nome do serviço para estatísticas
-                    except Exception as m2m_error:
-                        self.logger.error(f"M2M100 fallback translation also failed: {str(m2m_error)}")
-                        return text
-            
-            end_time = time.time()
-            
-            # Verificar resultado
-            if not translated_text:
-                self.logger.warning("Translation failed or returned empty result")
+                        from src.services.azure_openai_service import AzureOpenAIService
+                        self.translator_service = AzureOpenAIService(
+                            api_key=azure_openai_key,
+                            endpoint=azure_openai_endpoint,
+                            deployment_name=azure_openai_deployment
+                        )
+                        self.logger.info("Serviço Azure OpenAI inicializado manualmente com sucesso")
+                    except Exception as e:
+                        self.logger.error(f"Falha ao inicializar manualmente: {str(e)}")
+                        
+                # Se ainda não conseguimos, usar serviço local como fallback
+                if self.translator_service is None:
+                    self.logger.warning("Serviço de tradução não disponível, usando texto original")
+                    return text
+                
+            # Log do tipo de serviço para diagnóstico
+            if self.translator_service:
+                self.logger.info(f"Tipo do serviço de tradução: {type(self.translator_service).__name__}")
+                
+            # Tentar traduzir o texto
+            try:
+                # Formatar o texto para tradução (remover caracteres especiais, etc)
+                # Implementação futura: preparação do texto específica para cada idioma
+                
+                # Traduzir o texto - verificar qual método existe no serviço
+                start_time = time.time()
+                translated_text = None
+                
+                # Verificar qual método de tradução o serviço implementa
+                if hasattr(self.translator_service, 'translate_text'):
+                    self.logger.info("Usando método translate_text")
+                    translated_text = self.translator_service.translate_text(text, source_lang, target_lang)
+                elif hasattr(self.translator_service, 'translate'):
+                    self.logger.info("Usando método translate")
+                    translated_text = self.translator_service.translate(text, source_lang, target_lang)
+                elif hasattr(self.translator_service, 'generate_text'):
+                    self.logger.info("Usando método generate_text (Azure OpenAI)")
+                    # Para Azure OpenAI, preparar um prompt específico para tradução
+                    prompt = f"Translate the following text from {source_lang} to {target_lang}:\n\n{text}\n\nTranslation:"
+                    translated_text = self.translator_service.generate_text(prompt)
+                else:
+                    self.logger.error(f"Serviço de tradução {type(self.translator_service).__name__} não implementa método de tradução conhecido")
+                    return text
+                
+                end_time = time.time()
+                
+                # Verificar resultado
+                if not translated_text or translated_text.strip() == '':
+                    self.logger.warning("Translation returned empty result")
+                    return text
+                
+                # Log do resultado
+                translation_time = end_time - start_time
+                self.logger.info(f"Tradução bem-sucedida em {translation_time:.2f}s: '{text[:50]}....' -> '{translated_text[:50]}....'")
+                
+                # Registrar estatísticas
+                if hasattr(self, 'stats_service') and self.stats_service:
+                    word_count = len(text.split())
+                    target_word_count = len(translated_text.split())
+                    
+                    if hasattr(self.stats_service, 'add_translation'):
+                        self.stats_service.add_translation(
+                            source_lang, 
+                            target_lang, 
+                            word_count, 
+                            target_word_count, 
+                            translation_time
+                        )
+                
+                # Retornar o texto traduzido
+                return translated_text
+                
+            except Exception as e:
+                self.logger.error(f"Error in translation: {str(e)}")
+                self.logger.error(traceback.format_exc())
                 return text
                 
-            # Registrar sucesso e tempo
-            translation_time = end_time - start_time
-            self.logger.info(f"Translation successful in {translation_time:.2f}s using {translator_service_name}")
-            self.logger.debug(f"Translated text: {translated_text[:50]}..." if len(translated_text) > 50 else f"Translated text: {translated_text}")
-            
-            # Incrementar contadores de estatísticas
-            if hasattr(self, 'stats_service') and self.stats_service:
-                try:
-                    word_count = len(text.split())
-                    if hasattr(self.stats_service, 'add_translated_words'):
-                        self.stats_service.add_translated_words(word_count, translator_service_name)
-                    elif hasattr(self.stats_service, 'increment_translation_count'):
-                        self.stats_service.increment_translation_count(word_count)
-                except Exception as e:
-                    self.logger.error(f"Error updating translation statistics: {str(e)}")
-            
-            # Retornar texto traduzido
-            return translated_text
-            
         except Exception as e:
-            self.logger.error(f"Error in translation: {str(e)}")
+            self.logger.error(f"Error in _translate_text: {str(e)}")
             self.logger.error(traceback.format_exc())
             return text
 
@@ -1969,5 +2305,109 @@ class DictationManager:
         except Exception as e:
             logger.error(f"Failed to initialize stats service: {e}")
             self.stats_service = None
+    
+    def show_notification(self, message, notification_type="info", duration=2000):
+        """Exibe uma notificação para o usuário
+        
+        Args:
+            message (str): Mensagem a ser exibida
+            notification_type (str): Tipo de notificação ("info", "warning", "error")
+            duration (int): Duração em milissegundos
+        """
+        try:
+            self.logger.info(f"Mostrando notificação: {message} (tipo: {notification_type}, duração: {duration}ms)")
+            
+            # Tentativa com QSystemTrayIcon
+            try:
+                from PyQt5.QtWidgets import QApplication, QSystemTrayIcon
+                from PyQt5.QtGui import QIcon
+                import os
+                
+                # Determinar o caminho dos recursos - mais robusto
+                # Primeiro verificar se temos self.resources_path
+                resources_path = None
+                if hasattr(self, 'resources_path') and self.resources_path:
+                    resources_path = self.resources_path
+                else:
+                    # Tentar encontrar o caminho com base no diretório atual
+                    current_dir = os.path.dirname(os.path.abspath(__file__))
+                    possible_paths = [
+                        os.path.join(os.path.dirname(os.path.dirname(current_dir)), "resources"),  # ../../resources
+                        os.path.join(os.path.dirname(current_dir), "resources"),  # ../resources
+                        os.path.join(current_dir, "resources")  # ./resources
+                    ]
+                    for path in possible_paths:
+                        if os.path.exists(path):
+                            resources_path = path
+                            break
+                
+                # Se não conseguir encontrar, usar um ícone padrão ou nenhum ícone
+                icon_path = None
+                if resources_path:
+                    icon_path = os.path.join(resources_path, "icons", "app_icon.png")
+                    if not os.path.exists(icon_path):
+                        icon_path = None
+                
+                # Obter aplicação atual
+                app = QApplication.instance()
+                if app:
+                    # Criar ícone temporário se necessário
+                    if not hasattr(self, '_tray_icon') or self._tray_icon is None:
+                        self._tray_icon = QSystemTrayIcon()
+                        if icon_path:
+                            self._tray_icon.setIcon(QIcon(icon_path))
+                        else:
+                            # Usar um ícone padrão do sistema
+                            self._tray_icon.setIcon(QIcon.fromTheme("dialog-information"))
+                        self._tray_icon.show()
+                    
+                    # Mapear tipo de notificação para ícone
+                    icon_type = QSystemTrayIcon.Information
+                    if notification_type == "warning":
+                        icon_type = QSystemTrayIcon.Warning
+                    elif notification_type == "error":
+                        icon_type = QSystemTrayIcon.Critical
+                    
+                    # Mostrar notificação
+                    self._tray_icon.showMessage(
+                        "DogeDictate",
+                        message,
+                        icon_type,
+                        duration
+                    )
+                    return
+            except Exception as e:
+                self.logger.warning(f"Falha ao mostrar notificação com QSystemTrayIcon: {str(e)}")
+            
+            # Fallback para QMessageBox se QSystemTrayIcon falhar
+            try:
+                from PyQt5.QtWidgets import QMessageBox
+                from PyQt5.QtCore import QTimer, Qt
+                
+                # Criar message box sem bloquear
+                msg = QMessageBox()
+                msg.setWindowTitle("DogeDictate")
+                msg.setText(message)
+                msg.setWindowFlags(Qt.WindowStaysOnTopHint)
+                
+                # Definir ícone com base no tipo
+                if notification_type == "info":
+                    msg.setIcon(QMessageBox.Information)
+                elif notification_type == "warning":
+                    msg.setIcon(QMessageBox.Warning)
+                elif notification_type == "error":
+                    msg.setIcon(QMessageBox.Critical)
+                
+                # Configurar para fechar automaticamente
+                QTimer.singleShot(duration, msg.close)
+                
+                # Mostrar sem bloquear
+                msg.show()
+            except Exception as e:
+                self.logger.error(f"Falha ao mostrar notificação com QMessageBox: {str(e)}")
+                
+        except Exception as e:
+            self.logger.error(f"Erro ao mostrar notificação: {str(e)}")
+            self.logger.error(traceback.format_exc())
     
     

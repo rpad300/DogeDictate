@@ -29,6 +29,29 @@ class AzureOpenAIService:
         self.deployment_name = deployment_name
         self.logger = logging.getLogger(__name__)
         
+        # Log detalhado das credenciais
+        if self.api_key:
+            masked_key = self.api_key[:5] + "..." + self.api_key[-5:] if len(self.api_key) > 10 else "***"
+            self.logger.info(f"Azure OpenAI configurado: API Key presente = True, Endpoint = {self.endpoint}, Deployment = {self.deployment_name}")
+            
+            # Logs adicionais para depuração
+            self.logger.info(f"API Key Length: {len(self.api_key)}")
+            self.logger.info(f"Endpoint válido: {self.endpoint is not None and len(self.endpoint) > 0}")
+            self.logger.info(f"Deployment válido: {self.deployment_name is not None and len(self.deployment_name) > 0}")
+            
+            # Verificar formato do endpoint
+            if self.endpoint and not self.endpoint.startswith(("http://", "https://")):
+                self.logger.warning(f"Endpoint inválido: {self.endpoint} - deve começar com http:// ou https://")
+            
+            # Verificar deployment name
+            if not self.deployment_name or len(self.deployment_name.strip()) == 0:
+                self.logger.warning("Nome do deployment está vazio ou inválido")
+        else:
+            self.logger.warning("Azure OpenAI não configurado: API Key ausente")
+            # Logs adicionais para depuração
+            self.logger.warning(f"Endpoint recebido: {self.endpoint}")
+            self.logger.warning(f"Deployment recebido: {self.deployment_name}")
+        
     def is_configured(self):
         """
         Check if the service is properly configured
@@ -36,63 +59,81 @@ class AzureOpenAIService:
         Returns:
             bool: True if configured, False otherwise
         """
-        return (self.api_key is not None and 
+        is_config_valid = (self.api_key is not None and 
                 self.endpoint is not None and 
-                self.deployment_name is not None)
+                self.deployment_name is not None and
+                len(self.api_key.strip()) > 0 and
+                len(self.endpoint.strip()) > 0 and
+                len(self.deployment_name.strip()) > 0)
+                
+        # Log adicional para depuração
+        self.logger.info(f"Azure OpenAI configuração válida: {is_config_valid}")
+        self.logger.info(f"  - API Key presente: {self.api_key is not None and len(self.api_key.strip()) > 0}")
+        self.logger.info(f"  - Endpoint presente: {self.endpoint is not None and len(self.endpoint.strip()) > 0}")
+        self.logger.info(f"  - Deployment presente: {self.deployment_name is not None and len(self.deployment_name.strip()) > 0}")
+        
+        return is_config_valid
     
-    def translate(self, text, source_lang=None, target_lang=None):
+    def translate(self, text, source_language, target_language, prompt=None):
         """
-        Traduzir texto usando o Azure OpenAI
+        Translate text using Azure OpenAI API
         
         Args:
-            text (str): Texto a ser traduzido
-            source_lang (str, optional): Idioma de origem. Defaults to None.
-            target_lang (str, optional): Idioma de destino. Defaults to None.
+            text (str): Text to translate
+            source_language (str): Source language code
+            target_language (str): Target language code
+            prompt (str, optional): Custom prompt for translation. Defaults to None.
             
         Returns:
-            str: Texto traduzido
+            str: Translated text
         """
         if not self.is_configured():
-            self.logger.warning("Azure OpenAI não configurado para tradução")
-            return text
+            self.logger.error(f"Azure OpenAI não está configurado corretamente. API Key: {bool(self.api_key)}, Endpoint: {bool(self.endpoint)}, Deployment: {bool(self.deployment_name)}")
+            from PyQt5.QtWidgets import QMessageBox
+            QMessageBox.warning(
+                None,
+                "Erro de Configuração",
+                "O serviço Azure OpenAI não está configurado corretamente. Verifique suas configurações nas preferências do aplicativo.",
+                QMessageBox.Ok
+            )
+            return ""
             
+        self.logger.info(f"Traduzindo com Azure OpenAI de {source_language} para {target_language}")
+        
+        # Extract language codes without region for better prompting
+        source_lang_base = source_language.split('-')[0] if '-' in source_language else source_language
+        target_lang_base = target_language.split('-')[0] if '-' in target_language else target_language
+        
+        # Use custom prompt if provided, or create one
+        if not prompt:
+            prompt = f"Traduza o seguinte texto de {source_lang_base} para {target_lang_base} mantendo o estilo e significado original:\n\n{text}"
+        else:
+            prompt = prompt.format(source_language=source_lang_base, target_language=target_lang_base)
+            prompt = f"{prompt}\n\n{text}"
+            
+        self.logger.info(f"Usando prompt de tradução: {prompt[:50]}...")
+        
         try:
-            # Log mais detalhado para diagnóstico
-            self.logger.info(f"Azure OpenAI configurado: API Key presente = {bool(self.api_key)}, Endpoint = {self.endpoint}, Deployment = {self.deployment_name}")
+            result = self.generate_text(prompt, max_tokens=1024, temperature=0.1)
             
-            # Verificar se text é válido
-            if not text or len(text.strip()) == 0:
-                self.logger.warning("Texto vazio enviado para tradução")
+            if not result:
+                self.logger.error("Tradução falhou: resultado vazio")
                 return text
                 
-            # Criar prompt para tradução
-            prompt = f"Translate the following text from {source_lang} to {target_lang}:\n\n{text}\n\nTranslation:"
+            # Clean up the result - remove any "Translation:" prefixes
+            cleaned_result = result
+            prefixes_to_remove = ["Translation:", "Tradução:", "Translated text:"]
+            for prefix in prefixes_to_remove:
+                if cleaned_result.startswith(prefix):
+                    cleaned_result = cleaned_result[len(prefix):].strip()
             
-            self.logger.info(f"Traduzindo com Azure OpenAI de {source_lang} para {target_lang}")
-            
-            # Limitar tokens para evitar erros (dependendo do tamanho da entrada)
-            text_length = len(text.split())
-            max_tokens = min(4096, max(1024, text_length * 2))  # Estimar tokens necessários
-            
-            # Usar o método generate_text para obter a tradução
-            try:
-                self.logger.info(f"Chamando API Azure OpenAI com {max_tokens} tokens máximos")
-                translated_text = self.generate_text(prompt, max_tokens=max_tokens, temperature=0.3)
-                
-                if not translated_text:
-                    self.logger.warning("A tradução com Azure OpenAI falhou ou retornou vazio")
-                    return text
-                    
-                self.logger.info("Tradução com Azure OpenAI concluída com sucesso")
-                return translated_text
-                
-            except Exception as api_error:
-                self.logger.error(f"Falha na chamada à API do Azure OpenAI: {str(api_error)}")
-                # Retornar o texto original em caso de erro
-                return text
+            self.logger.info(f"Tradução bem-sucedida: '{text[:30]}...' -> '{cleaned_result[:30]}...'")
+            return cleaned_result
             
         except Exception as e:
-            self.logger.error(f"Erro ao traduzir com Azure OpenAI: {str(e)}")
+            self.logger.error(f"Erro na tradução com Azure OpenAI: {str(e)}")
+            import traceback
+            self.logger.error(traceback.format_exc())
             return text
         
     def generate_text(self, prompt, max_tokens=100, temperature=0.7):
@@ -209,4 +250,30 @@ class AzureOpenAIService:
             return ""
         except Exception as e:
             self.logger.error(f"Error generating text with Azure OpenAI: {str(e)}")
-            return "" 
+            return ""
+
+    def update_credentials(self, api_key, endpoint, deployment_name):
+        """
+        Update credentials for Azure OpenAI service
+        
+        Args:
+            api_key (str): API key for Azure OpenAI
+            endpoint (str): Endpoint URL for Azure OpenAI
+            deployment_name (str): Deployment name for Azure OpenAI model
+            
+        Returns:
+            bool: True if update is successful, False otherwise
+        """
+        try:
+            self.api_key = api_key
+            self.endpoint = endpoint
+            self.deployment_name = deployment_name
+            
+            # Log detalhado
+            masked_key = self.api_key[:5] + "..." + self.api_key[-5:] if len(self.api_key) > 10 else "***"
+            self.logger.info(f"Credenciais do Azure OpenAI atualizadas: API Key={masked_key}, Endpoint={endpoint}, Deployment={deployment_name}")
+            
+            return self.is_configured()
+        except Exception as e:
+            self.logger.error(f"Erro ao atualizar credenciais do Azure OpenAI: {str(e)}")
+            return False 
